@@ -8,22 +8,22 @@ import bluesky_gym.envs.common.functions as fn
 import gymnasium as gym
 from gymnasium import spaces
 
-DISTANCE_MARGIN = 5 # km
+DISTANCE_MARGIN = 5 # km , distance to have reached the waypoint
 REACH_REWARD = 1
 
 DRIFT_PENALTY = -0.1
 INTRUSION_PENALTY = -1
 
-NUM_INTRUDERS = 5
-NUM_WAYPOINTS = 1
-INTRUSION_DISTANCE = 5 # NM
+NUM_INTRUDERS = 5 # number of intruders per ownship
+NUM_WAYPOINTS = 1 # straight line to waypoint
+INTRUSION_DISTANCE = 5 # NM TODO:make this way less, about 50 meters?
 
-WAYPOINT_DISTANCE_MIN = 100
-WAYPOINT_DISTANCE_MAX = 150
+WAYPOINT_DISTANCE_MIN = 100 # TODO: make reasonable for drones
+WAYPOINT_DISTANCE_MAX = 150 
 
 D_HEADING = 45
 
-AC_SPD = 150
+AC_SPD = 150 # speed of the intruders
 
 NM2KM = 1.852
 
@@ -126,12 +126,12 @@ class HorizontalCREnv(gym.Env):
         return observation, reward, terminated, False, info
 
     def _generate_conflicts(self, acid = 'KL001'):
-        target_idx = bs.traf.id2idx(acid)
-        for i in range(NUM_INTRUDERS):
-            dpsi = np.random.randint(45,315)
-            cpa = np.random.randint(0,INTRUSION_DISTANCE)
-            tlosh = np.random.randint(100,1000)
-            bs.traf.creconfs(acid=f'{i}',actype="A320",targetidx=target_idx,dpsi=dpsi,dcpa=cpa,tlosh=tlosh)
+        target_idx = bs.traf.id2idx(acid) # Gets the index of the ownship in BlueSky’s traffic list.
+        for i in range(NUM_INTRUDERS): # Repeats for the number of intruders you want to create.
+            dpsi = np.random.randint(45,315) # random angle ofset
+            cpa = np.random.randint(0,INTRUSION_DISTANCE) # closets point of approach
+            tlosh = np.random.randint(100,1000) # time to loss of separation in seconds, so when the intruder will reach the CPA
+            bs.traf.creconfs(acid=f'{i}',actype="A320",targetidx=target_idx,dpsi=dpsi,dcpa=cpa,tlosh=tlosh) # create the intruder 
 
     def _generate_waypoint(self, acid = 'KL001'):
         self.wpt_lat = []
