@@ -88,7 +88,8 @@ class HorizontalCREnv(gym.Env):
         self.total_intrusions = 0
         self.average_drift = np.array([])
 
-        bs.traf.cre('KL001',actype="A320",acspd=AC_SPD)
+        # TODO: change to drone model
+        bs.traf.cre('KL001',actype="M600",acspd=AC_SPD)
 
         self._generate_conflicts()
         self._generate_waypoint()
