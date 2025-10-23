@@ -1,0 +1,4 @@
+episode_index,steps,mean_reward_drift,mean_reward_progress,mean_reward_intrusion,sum_reward_drift,sum_reward_progress,sum_reward_intrusion,total_intrusions,finished_at
+1,8,-0.19775522314545588,0.0,-0.125,-1.582041785163647,0.0,-1.0,1,1761054471.8136375
+2,15,-0.188321292628021,0.0,0.0,-2.824819389420315,0.0,0.0,0,1761054472.516383
+3,47,-0.16303109504884356,0.0,0.0,-7.662461467295647,0.0,0.0,0,1761054473.9166474

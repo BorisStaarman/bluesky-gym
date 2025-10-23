@@ -1,4 +1,6 @@
 from gymnasium.envs.registration import register
+from ray.tune.registry import register_env
+
 from .utils import *
  
 def register_envs():
@@ -32,7 +34,19 @@ def register_envs():
         entry_point="bluesky_gym.envs.sector_cr_env:SectorCREnv",
         max_episode_steps=200,
     )
+    
+    register(
+        id="SectorCREnv-v0_boris",
+        entry_point="bluesky_gym.envs.sector_cr_env_boris:SectorCREnv_boris",
+        max_episode_steps=200,
+    )
 
+    register(
+        id="ma_env-v0",
+        entry_point="bluesky_gym.envs.ma_env:SectorEnv",
+        max_episode_steps=200,
+    )
+    
     register(
         id="StaticObstacleEnv-v0",
         entry_point="bluesky_gym.envs.static_obstacle_env:StaticObstacleEnv",
@@ -44,3 +58,10 @@ def register_envs():
         entry_point="bluesky_gym.envs.merge_env:MergeEnv",
         max_episode_steps=50,
     )
+    
+    # the environment of the MARL scenario
+    # This creator function is what RLlib will use. It takes a config dictionary
+    # and passes it as arguments to your environment's __init__ method.
+    from bluesky_gym.envs.ma_env import SectorEnv
+
+    register_env("sector_env", lambda config: SectorEnv(**config))

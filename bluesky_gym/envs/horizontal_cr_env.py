@@ -97,6 +97,7 @@ class HorizontalCREnv(gym.Env):
         info = self._get_info()
 
         if self.render_mode == "human":
+            self.window = None
             self._render_frame()
 
         return observation, info
