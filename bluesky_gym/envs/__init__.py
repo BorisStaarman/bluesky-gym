@@ -5,6 +5,8 @@ from bluesky_gym.envs.vertical_cr_env import *
 from bluesky_gym.envs.horizontal_cr_env import *
 from bluesky_gym.envs.merge_env import *
 from bluesky_gym.envs.sector_cr_env import *
-from bluesky_gym.envs.ma_env import *
+from bluesky_gym.envs.ma_env_ppo import *
+from bluesky_gym.envs.ma_env_ppo_AM import *
 from bluesky_gym.envs.sector_cr_env_boris import *
-
+from bluesky_gym.envs.ma_env_SAC import *
+from bluesky_gym.envs.ma_env_SAC_new import *

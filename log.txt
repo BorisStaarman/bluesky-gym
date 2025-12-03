@@ -1,0 +1,60 @@
+15_10 only reaches the waypoint and does not do any intrusion handling
+
+17_10 is a baseline which does not train good, but gets decent results
+
+23_10 is trying to improve on the training of 17_10, making it stable
+making it stable did not work, but we do see some sort of better intrusion ontwijk behavior
+this was furst run with action frequency to 2 instead of 5
+
+
+24_10 is trying to make 23_10 stable
+action frequency naar 1
+dit is geeindigt met een code die een episode eindigt als er een botsing plaats vind. ook start de
+training met 4 drones, gaat op een gegeven moment naar 5 en uiteindelijk naar 6. werkt niet goed
+
+27_10: verder met 24_10 maar aanpassing is dat de episode nu niet wordt geeindigt na een botsing maar 
+drones maar 1 keer een botsing penalty kunnen krijgen.
+resultaat: dit is een prima getrainde model. er is wel sprake van collission avoidance maar nog steeds niet heel veel. trainen over langere tijd leidt er nog steeds to dat 
+er meer intrusions plaatsvinden en meer naar de waypoint wordt gekeken.
+opzich werkt dit model prima. kan zeker beter maar doet wel iets.
+
+
+28_10: 
+ testen:  kijken of het object space sorteren goed werkt? lijkt gefixt werkt prima
+volgende stap: alle rewards en penalties / 10 gedaan. daarna wel intrusion penalty *3
+levert aardige grafiekjes op qua trainen maar resultaten zijn er nog niet echt
+DIT IS VOOR NU EVEN DE FINAL MODEL VOOR MODEL1 sectorcr_ma_ppo
+resultaten staan einde logboek 27_10 
+
+29_10:
+checken 1. of de drones ooit snelheid minderen?
+deze versie is uiteindelijk gedownload en gebruikt als 'final' model
+
+
+----------------------------SAC-----------------------------------------------------------
+5_11 first try doing SAC algorithm
+
+7_11 first try using tensorboard to analyze the training
+not worked on this one ever. can delete this one
+
+11_11
+de ding van 5_11 traint niet fatsoenlijk. deze poging probeert training the laten werken
+werkt uiteindelijk goed bij iets van 2 uur trainen
+laatste run werkt goed
+
+13_11
+code van 11_11 proberen nog beter te laten werken, 
+final iteration 10.000 werkt het beste, goeie performance!!!!!!
+
+17_11 
+proberen nog minder intrusions te krijgen, verder met 13_11 code en params
+de drones hadden de neiging om om elkaar heen te gaan circelen bij 13_11 want dat gaf weinig penalty als ze eenmaal
+een intrusion penalty hadden gekregen. 
+deze aanpassing kunnen ze wel meer penalties krijgen als ze in elkaars intrusion zone blijven
+
+27_11_1 training run op 30 Aircraft met POLY_AREA_RANGE = (0.75, 0.8)
+dit komt neer op een density van ongeveer 12. 
+zelfde parameters als 17_11 ongeveer
+
+27_11_2: paar grote veranderingen. gebruikt ma_env_SAC_new
+nieuwe risk, nieuwe observation vector, nieuwe reward functie

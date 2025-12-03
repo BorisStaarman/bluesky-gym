@@ -1,0 +1,4 @@
+iteration,avg_reward,avg_length,avg_intrusions,waypoint_rate
+10,-18.392,381.77,1.7,0.1167
+20,-14.703,144.6,1.4,0.0556
+30,-16.614,262.1,0.93,0.0167
