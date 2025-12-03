@@ -6,3 +6,18 @@ images/
 logs/
 models/
 dist/
+
+# my own files that i dont want pushed
+boris_test_files/
+
+# alle csv files
+*.csv
+
+#  all metrics mappen
+metrics/
+metrics*/
+metrics_*/
+
+# dont push all sac metrics
+SAC/**/metrics/
+PPO/**/metrics/

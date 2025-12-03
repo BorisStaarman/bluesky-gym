@@ -11,61 +11,59 @@ import ray
 from ray.rllib.algorithms.algorithm import Algorithm
 
 # Make sure these imports point to your custom environment files
-from bluesky_gym.envs.ma_env_SAC_new import SectorEnv  # Use SAC_new version (24 features)
+from bluesky_gym.envs.ma_env_SAC import SectorEnv  # Use SAC version
 from bluesky_gym import register_envs
 from run_config import RUN_ID
 
+
 # Register your custom environment with Gymnasium
 register_envs()
+
 
 # Conversion factor from meters per second to knots
 MpS2Kt = 1.94384
 # Conversion factor from nautical miles to kilometers
 NM2KM = 1.852
 
+def calculate_polygon_area_km2(poly_points):
+    """
+    Calculate the area of a polygon in km² given vertices in nautical miles.
+    
+    Parameters
+    ----------
+    poly_points : np.array
+        Array of polygon vertices in nautical miles (x, y coordinates)
+    
+    Returns
+    -------
+    float
+        Area of the polygon in square kilometers
+    """
+    from bluesky_gym.envs.common import functions as fn
+    
+    # Calculate area in NM² using the Shoelace formula
+    area_nm2 = fn.polygon_area(poly_points)
+    
+    # Convert from NM² to km²
+    area_km2 = area_nm2 * (NM2KM ** 2)
+    
+    return area_km2
+
 # --- Parameters for Evaluation ---
-N_AGENTS = 20  # The number of agents the model was trained with
-NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
-RENDER = False # Set to True to watch the agent play
-# NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
-# RENDER = True # Set to True to watch the agent play
+N_AGENTS = 6  # The number of agents the model was trained with
+# NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
+# RENDER = False # Set to True to watch the agent play
+NUM_EVAL_EPISODES = 20  # How many episodes to run for evaluation
+RENDER = True # Set to True to watch the agent play
 
 # This path MUST match the checkpoint directory from your main.py training script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 BASE_CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac")
 METRICS_DIR = os.path.join(script_dir, "metrics")
 
-# --- CHOOSE WHICH CHECKPOINT TO EVALUATE ---
-USE_BEST_CHECKPOINT = True  # Set to True to use best checkpoint, False for final checkpoint
-
-def find_best_checkpoint(base_dir):
-    """Find the best checkpoint (best_iter_XXXXX) in the checkpoint directory."""
-    if not os.path.exists(base_dir):
-        return None
-    # Look for best_iter_* subdirectories
-    best_checkpoints = [
-        d for d in os.listdir(base_dir) 
-        if os.path.isdir(os.path.join(base_dir, d)) and d.startswith("best_iter_")
-    ]
-    if not best_checkpoints:
-        return None
-    # Sort by iteration number (extract from best_iter_XXXXX)
-    best_checkpoints.sort(key=lambda x: int(x.split("_")[-1]), reverse=True)
-    # Return the most recent best checkpoint
-    return os.path.join(base_dir, best_checkpoints[0])
-
-# Determine which checkpoint to use
-if USE_BEST_CHECKPOINT:
-    best_checkpoint = find_best_checkpoint(BASE_CHECKPOINT_DIR)
-    if best_checkpoint:
-        CHECKPOINT_DIR = best_checkpoint
-        print(f"🌟 Using BEST checkpoint: {os.path.basename(CHECKPOINT_DIR)}")
-    else:
-        CHECKPOINT_DIR = BASE_CHECKPOINT_DIR
-        print(f"⚠️  No best checkpoint found, using final checkpoint")
-else:
-    CHECKPOINT_DIR = BASE_CHECKPOINT_DIR
-    print(f"📁 Using FINAL checkpoint")
+# --- ALWAYS USE FINAL MODEL ---
+CHECKPOINT_DIR = os.path.join(BASE_CHECKPOINT_DIR, "final_model")
+print(f"📁 Using FINAL MODEL checkpoint")
 
 
 if __name__ == "__main__":
@@ -76,19 +74,18 @@ if __name__ == "__main__":
 
     # --- Check if a checkpoint exists ---
     if not os.path.exists(CHECKPOINT_DIR):
-        print(f"❌ Checkpoint directory not found at: {CHECKPOINT_DIR}")
-        print("Please run the `main.py` script first to train and save a model.")
+        print(f"❌ Final model checkpoint not found at: {CHECKPOINT_DIR}")
+        print("Please run the `main.py` script first with SAVE_FINAL_MODEL=True to train and save the final model.")
         ray.shutdown()
         exit()
 
-    print(f"\n🎯 Evaluating policy from checkpoint:")
+    print(f"\n🎯 Evaluating FINAL MODEL from checkpoint:")
     print(f"   {CHECKPOINT_DIR}\n")
 
     # --- Load the trained algorithm and policy ---
     algo = Algorithm.from_checkpoint(CHECKPOINT_DIR)
     
     # OLD API: Get policy from workers, not module
-    # module = algo.get_module("shared_policy")  # This is NEW API only
     policy = algo.get_policy("shared_policy")
     
     env = SectorEnv(
@@ -104,20 +101,13 @@ if __name__ == "__main__":
     episode_intrusions = []
     total_waypoints_reached = 0
     episode_witout_intrusion = 0
-    # velocity_agent_1 = []
-    # `polygon`_areas_km2 = []  # Store polygon area in km² for each episode
+    velocity_agent_1 = []
 
     # --- Main Evaluation Loop ---
     for episode in range(1, NUM_EVAL_EPISODES + 1):
         print(f"\n--- Starting Evaluation Episode {episode}/{NUM_EVAL_EPISODES} ---")
 
         obs, info = env.reset()
-        
-        # Calculate and store polygon area for this episode
-        # polygon_area = calculate_polygon_area_km2(env.poly_points)
-        # polygon_areas_km2.append(polygon_area)
-        # print(f"   - Polygon Area: {polygon_area:.4f} km²")
-        
         episode_reward = 0.0
         episode_steps = 0
         
@@ -129,8 +119,6 @@ if __name__ == "__main__":
             
             # Compute deterministic actions (no exploration)
             actions_np = policy.compute_actions(obs_array, explore=False)[0]
-            # print(actions_np)
-            
             
             # Map actions back to agent IDs
             actions = {agent_id: action for agent_id, action in zip(agent_ids, actions_np)}
@@ -138,16 +126,13 @@ if __name__ == "__main__":
             # Step the environment
             obs, rewards, terminateds, truncateds, infos = env.step(actions)
             
-            # ac_idx = bs.traf.id2idx("KL001")
-            # airspeed_kts = bs.traf.tas[ac_idx] * MpS2Kt
-            # velocity_agent_1.append(airspeed_kts)
-            # print(airspeed_kts)
+            ac_idx = bs.traf.id2idx("KL001")
+            airspeed_kts = bs.traf.tas[ac_idx] * MpS2Kt
+            velocity_agent_1.append(airspeed_kts)
             
             if rewards:
                 episode_reward += sum(rewards.values())
             episode_steps += 1
-            
-            
             
             # Slow down rendering to make it watchable
             if RENDER:
@@ -161,8 +146,6 @@ if __name__ == "__main__":
         print(f"   - Intrusions: {env.total_intrusions}")
         print(f"   - Waypoints Reached: {len(env.waypoint_reached_agents)}/{N_AGENTS}")
         
-        
-        
 
         episode_rewards.append(episode_reward)
         episode_steps_list.append(episode_steps)
@@ -173,14 +156,8 @@ if __name__ == "__main__":
     max_intrusions = max(episode_intrusions)
     max_intrusion_episode = episode_intrusions.index(max_intrusions) + 1  # +1 because episodes start at 1
     
-    # Calculate polygon area statistics
-    # avg_polygon_area = np.mean(polygon_areas_km2)
-    # min_polygon_area = np.min(polygon_areas_km2)
-    # max_polygon_area = np.max(polygon_areas_km2)
-    # std_polygon_area = np.std(polygon_areas_km2)
-    
     print("\n" + "="*50)
-    print("✅ EVALUATION COMPLETE")
+    print("✅ EVALUATION COMPLETE (FINAL MODEL)")
     print(f"Ran {NUM_EVAL_EPISODES} episodes.")
     print(f"  - Average Reward: {np.mean(episode_rewards):.3f}")
     print(f"  - Average Episode Length: {np.mean(episode_steps_list):.1f} steps")
@@ -189,33 +166,17 @@ if __name__ == "__main__":
     
     waypoint_rate = (total_waypoints_reached / (NUM_EVAL_EPISODES * N_AGENTS)) * 100
     print(f"  - Overall Waypoint Reached Rate: {waypoint_rate:.1f}%")
-    print(f"  - Episodes without Intrusion: {episode_witout_intrusion}")
-    
-    print('average density created', N_AGENTS / np.mean(env.areas_km2))
-    
-    # print(f"\n📐 Polygon Area Statistics:")
-    # print(f"  - Average Area: {avg_polygon_area:.4f} km²")
-    # print(f"  - Min Area: {min_polygon_area:.4f} km²")
-    # print(f"  - Max Area: {max_polygon_area:.4f} km²")
-    # print(f"  - Std Dev: {std_polygon_area:.4f} km²")
-    # print("="*50 + "\n")
+    print(f"   - episode without Intrusion: {episode_witout_intrusion}")
+    print("="*50 + "\n")
 
-    # # --- Plot the results ---
-    # plt.figure(figsize=(12, 6))
-    # plt.plot(range(1, NUM_EVAL_EPISODES + 1), episode_rewards, marker='o', linestyle='-')
-    # plt.title("Total Reward per Evaluation Episode")
-    # plt.xlabel("Episode Number")
-    # plt.ylabel("Total Reward")
-    # plt.xticks(range(1, NUM_EVAL_EPISODES + 1))
-    # plt.grid(True)
-    # plt.show()
-    # plt.figure(figsize=(12, 6))
-    # plt.plot(range(1, len(velocity_agent_1) + 1), velocity_agent_1, marker='o', linestyle='-')
-    # plt.title("Velocity of Agent KL001 During Evaluation Episodes")
-    # plt.xlabel("Time Step")
-    # plt.ylabel("Velocity (knots)")
-    # plt.grid(True)
-    # plt.show()
+    # Plot velocity of agent 1
+    plt.figure(figsize=(12, 6))
+    plt.plot(range(1, len(velocity_agent_1) + 1), velocity_agent_1, marker='o', linestyle='-')
+    plt.title("Velocity of Agent KL001 During Evaluation Episodes (FINAL MODEL)")
+    plt.xlabel("Time Step")
+    plt.ylabel("Velocity (knots)")
+    plt.grid(True)
+    plt.show()
 
 
     # --- Clean up ---

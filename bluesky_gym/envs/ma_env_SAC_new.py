@@ -40,7 +40,7 @@ WAYPOINT_REACHED_REWARD = 2.0  # Reward for reaching waypoint
 PROGRESS_REWARD_SCALE = 2.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
 BOUNDARY_VIOLATION_PENALTY = -2.0  # Penalty for leaving polygon boundary (not at waypoint)
-STEP_PENALTY = -0.01  # Small penalty applied every step to encourage efficiency
+STEP_PENALTY = -0.012  # Small penalty applied every step to encourage efficiency
 
 # Proximity penalty parameters
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance (150m when intrusion is 100m)

@@ -58,3 +58,13 @@ zelfde parameters als 17_11 ongeveer
 
 27_11_2: paar grote veranderingen. gebruikt ma_env_SAC_new
 nieuwe risk, nieuwe observation vector, nieuwe reward functie
+deze werkte erg goed
+
+12_2: code van 27_11_2 overgenomen, parameters aangepast
+hele goeie run; SAC_5
+25 agents lijkt goed. 30 lijkt te veel 
+
+12_3: zelfde als 12_2. deze code voorbereiden om op nlr server te runnen. 
+paar kleine aanpassingen, laatste plot wordt in 1 keer opgeslagen zodat de code gewoon uit kan runnen
+daarnaast gaat de step penalty iets omhoog omdat drones nog langzaam vliegen
+stuk meer training points

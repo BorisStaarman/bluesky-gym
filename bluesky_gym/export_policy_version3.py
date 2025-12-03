@@ -76,9 +76,17 @@ def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file):
 # )
 
 
-# code for model 4, SAC/11_27_2 (OLD API) - BEST ITERATION
+# # code for model 4, SAC/11_27_2 (OLD API) - BEST ITERATION
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC\11_27_2\models\sectorcr_ma_sac\best_iter_09590",
+#     "shared_policy",
+#     r"C:\Users\boris\AppData\Local\Programs\Python\Python312\Lib\site-packages\bluesky\plugins\models_boris\SAC_4.pt",
+# )
+
+
+# code for model 5 SAC/12_2/
 export_policy_torch_old_api(
-    r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC\11_27_2\models\sectorcr_ma_sac\best_iter_09590",
+    r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC\12_2\models\sectorcr_ma_sac\best_iter_13727",
     "shared_policy",
-    r"C:\Users\boris\AppData\Local\Programs\Python\Python312\Lib\site-packages\bluesky\plugins\models_boris\SAC_4.pt",
+    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_5.pt",
 )
