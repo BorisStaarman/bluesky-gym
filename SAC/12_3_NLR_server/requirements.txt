@@ -1,0 +1,20 @@
+# Core dependencies for SAC training on remote server
+# Python 3.12.3
+
+# RL Framework
+ray[rllib]==2.49.2
+torch==2.3.0
+
+# BlueSky Simulator and Gym
+bluesky-simulator==1.0.7
+gymnasium==1.1.1
+pygame==2.6.1
+
+# Data Science & Visualization
+numpy==1.26.4
+pandas==2.2.2
+matplotlib==3.10.3
+
+# Additional utilities
+cloudpickle==3.0.0
+psutil==5.9.8
