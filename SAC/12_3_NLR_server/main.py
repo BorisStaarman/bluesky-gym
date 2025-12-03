@@ -32,7 +32,7 @@ register_envs()
 
 # --- Parameters ---
 N_AGENTS = 25  # Number of agents for training
-TOTAL_ITERS = 10  # Maximum total iterations
+TOTAL_ITERS = 25000  # Maximum total iterations
 EXTRA_ITERS = 50           # When resuming, run this many more iterations
 FORCE_RETRAIN = True       # Start fresh with new hyperparameters
 # Optional: Only useful if you want periodic checkpoints mid-training.
