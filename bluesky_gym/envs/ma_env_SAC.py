@@ -61,7 +61,7 @@ AIRSPEED_CENTER_KTS = 35.0
 AIRSPEED_SCALE_KTS = 10.0 * 3.4221
 
 # collision risk parameters
-PROTECTED_ZONE_M = 50  # meters
+PROTECTED_ZONE_M = 100  # meters
 CPA_TIME_HORIZON_S = 15 # seconds
 
 # logging

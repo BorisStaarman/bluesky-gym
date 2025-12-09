@@ -10,3 +10,4 @@ from bluesky_gym.envs.ma_env_ppo_AM import *
 from bluesky_gym.envs.sector_cr_env_boris import *
 from bluesky_gym.envs.ma_env_SAC import *
 from bluesky_gym.envs.ma_env_SAC_new import *
+from bluesky_gym.envs.ma_env_SAC_AM import *

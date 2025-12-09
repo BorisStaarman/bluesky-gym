@@ -11,14 +11,15 @@ import time
 
 
 # scenario constants
-POLY_AREA_RANGE = (1.0, 1.2)
-CENTER = np.array([51.990426702297746, 4.376124857109851]) 
+POLY_AREA_RANGE = (0.75, 0.8)
+CENTER = np.array([52.362566, 4.881444]) # new center from training scenario
 
 # aircraft constants
 ALTITUDE = 360
 AC_SPD = 0 # starting speed, in m/s !
 AC_TYPE = "m600"
-INTRUSION_DISTANCE = 0.054
+INTRUSION_DISTANCE = 1 / 1852 * 50  # was 0.054
+COLLISION_DISTANCE = 1 / 1852 * 100  # 100 meters - collision threshold (terminates both aircraft)
 
 # conversion factors
 NM2KM = 1.852
@@ -75,12 +76,12 @@ LOG_EVERY_N = 100  # throttle repeated warnings
 # Add a base dir for metrics written by this env
 # NOTE: When copying this folder to a new date/version, update this constant!
 # Or better: pass metrics_base_dir via env_config in your training script
-METRICS_BASE_DIR = "metrics_28_10"
+METRICS_BASE_DIR = "metrics"
 
 class SectorEnv(MultiAgentEnv):
     metadata = {"name": "ma_env", "render_modes": ["rgb_array", "human"], "render_fps": 10}
 
-    def __init__(self, render_mode=None, n_agents=10, run_id="default",
+    def __init__(self, render_mode=None, n_agents=20, run_id="default",
                  debug_obs=False, debug_obs_episodes=2, debug_obs_interval=1, debug_obs_agents=None,
                  collect_obs_stats=False, print_obs_stats_per_episode=False,
                  intrusion_penalty=None, metrics_base_dir=None):
@@ -143,6 +144,9 @@ class SectorEnv(MultiAgentEnv):
 
         # for evaluations
         self.total_intrusions = 0
+        
+        # collision tracking
+        self.collided_agents = set()  # Agents that have collided and should be terminated
 
         # stuff for making csv file
         self._agent_steps = {}
@@ -185,6 +189,9 @@ class SectorEnv(MultiAgentEnv):
         # for evaluation
         self.total_intrusions = 0
         
+        # reset collision tracking
+        self.collided_agents = set()
+        
         self.previous_distances = {}
         self.waypoint_reached_agents = set()
         
@@ -205,7 +212,7 @@ class SectorEnv(MultiAgentEnv):
             self._render_frame()
 
         observations, _, _ = self._get_observation(self.agents)
-        self._update_obs_stats(observatioget_obsns)
+        self._update_obs_stats(observations)
         self._maybe_print_observations(observations, when="reset")
         infos = {agent: {} for agent in self.agents}
         return observations, infos
@@ -230,6 +237,10 @@ class SectorEnv(MultiAgentEnv):
         self._update_obs_stats(observations)
         self._env_step += 1
         self._maybe_print_observations(observations, when="step")
+        
+        # Check for collisions before calculating rewards
+        self._check_collisions(agents_in_step)
+        
         rewards, infos = self._get_reward(agents_in_step)
         
         # After computing all rewards, mark newly penalized pairs as permanently penalized
@@ -251,6 +262,7 @@ class SectorEnv(MultiAgentEnv):
             
             # Determine termination reason
             waypoint_reached = a in self.waypoint_reached_agents
+            collided = a in self.collided_agents
             truncated = truncateds.get(a, False)
 
             # buffer one row for THIS agent only
@@ -267,6 +279,7 @@ class SectorEnv(MultiAgentEnv):
                 "sum_reward_proximity": self._rewards_acc.get(a, {}).get("proximity", 0.0),
                 "total_intrusions":     self._intrusions_acc.get(a, 0),
                 "terminated_waypoint": waypoint_reached,  # True if agent reached waypoint
+                "terminated_collision": collided,  # True if agent collided with another aircraft
                 "truncated": truncated,  # True if episode truncated (out of bounds or time limit)
                 "finished_at": time.time(),  
             })
@@ -345,6 +358,7 @@ class SectorEnv(MultiAgentEnv):
                     "sum_reward_proximity",
                     "total_intrusions",
                     "terminated_waypoint",   # True if agent reached waypoint
+                    "terminated_collision",  # True if agent collided with another aircraft
                     "truncated",             # True if truncated (out of bounds/time limit)
                     "finished_at",
                 ],
@@ -838,9 +852,9 @@ class SectorEnv(MultiAgentEnv):
                 })
     
     def _get_terminateds(self, active_agents):
-        # Only terminate agents that reached their waypoint
-        # Intrusions no longer cause episode termination
-        return {agent: agent in self.waypoint_reached_agents for agent in active_agents}
+        # Terminate agents that reached their waypoint OR collided with another aircraft
+        return {agent: (agent in self.waypoint_reached_agents or agent in self.collided_agents) 
+                for agent in active_agents}
     
     def _get_truncateds(self, active_agents):
         truncateds = {}
@@ -1001,6 +1015,47 @@ class SectorEnv(MultiAgentEnv):
         ratio = (soft_thresh - min_dist) / band if band > 0 else 0.0
         ratio = np.clip(ratio, 0.0, 1.0)
         return -self.proximity_max_penalty * float(ratio)
+    
+    def _check_collisions(self, active_agents):
+        """Check for collisions between aircraft and mark collided agents for termination.
+        
+        A collision occurs when two aircraft are closer than COLLISION_DISTANCE.
+        Both aircraft in a collision are marked for termination.
+        
+        Args:
+            active_agents: List of currently active agent IDs
+        """
+        agents_to_check = [agent for agent in active_agents if agent not in self.collided_agents]
+        
+        for i, agent_i in enumerate(agents_to_check):
+            if agent_i in self.collided_agents:
+                continue
+                
+            try:
+                ac_idx_i = bs.traf.id2idx(agent_i)
+            except (IndexError, KeyError):
+                continue
+            
+            for agent_j in agents_to_check[i+1:]:
+                if agent_j in self.collided_agents:
+                    continue
+                    
+                try:
+                    ac_idx_j = bs.traf.id2idx(agent_j)
+                except (IndexError, KeyError):
+                    continue
+                
+                # Calculate distance between aircraft
+                _, distance = bs.tools.geo.kwikqdrdist(
+                    bs.traf.lat[ac_idx_i], bs.traf.lon[ac_idx_i],
+                    bs.traf.lat[ac_idx_j], bs.traf.lon[ac_idx_j]
+                )
+                
+                # Check for collision
+                if distance < COLLISION_DISTANCE:
+                    self.collided_agents.add(agent_i)
+                    self.collided_agents.add(agent_j)
+                    print(f"[COLLISION] Agents {agent_i} and {agent_j} collided at distance {distance*1852:.1f}m")
     
     def _check_intrusion(self, agent_id, ac_idx):
         """Return intrusion penalty for this agent on this step, and intrusion flag.

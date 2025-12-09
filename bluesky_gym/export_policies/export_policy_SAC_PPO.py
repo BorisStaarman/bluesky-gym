@@ -1,6 +1,9 @@
 from pathlib import Path
 import torch
 import ray
+import sys
+import numpy as np
+
 from ray.rllib.core.rl_module.rl_module import RLModule
 from ray.rllib.algorithms.algorithm import Algorithm
 
@@ -15,15 +18,44 @@ def export_policy_torch_new_api(checkpoint_dir, policy_id, export_file):
     torch.save(module.state_dict(), export_file)
     print(f"✅ Saved Torch weights (NEW API): {export_file}")
 
-def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file):
+def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file, env_creator=None, runtime_env=None):
     """Export policy weights for OLD API checkpoints (like SAC with enable_rl_module_and_learner=False)"""
-    # Initialize Ray if not already initialized
-    if not ray.is_initialized():
-        ray.init(ignore_reinit_error=True)
     
+    # 1. Define the exclusions
+    files_to_exclude = [
+        "*.pkl",                # Exclude policy state files
+        "*.csv",                # Exclude large metric files
+        "*/metrics/*",          # Ignore everything inside metrics folders
+        "*/models/*",           # Ignore everything inside models folders
+        "*/SAC_AM/*"            # Ignore the specific heavy training folder
+    ]
+    
+    # 2. Initialize Ray (CORRECTED LOGIC)
+    if not ray.is_initialized():
+        # If runtime_env wasn't provided, create a blank dictionary
+        if runtime_env is None:
+            runtime_env = {}
+            
+        # Ensure the 'excludes' key exists in the dictionary
+        if "excludes" not in runtime_env:
+            runtime_env["excludes"] = []
+            
+        # Add your excluded files to the configuration
+        runtime_env["excludes"].extend(files_to_exclude)
+        
+        print(f"🚀 Starting Ray with excludes: {runtime_env['excludes']}")
+        ray.init(ignore_reinit_error=True, runtime_env=runtime_env)
+    
+    # --- The rest of your function remains the same ---
     # Register the custom environment
-    register_envs()
-    print("✅ Registered custom environments")
+    if env_creator is None:
+        register_envs()
+        print("✅ Registered custom environments")
+    else:
+        # Use provided env_creator for custom environments
+        from ray.tune.registry import register_env
+        register_env("sector_env", env_creator)
+        print("✅ Registered custom environment with provided creator")
     
     # Load the full algorithm from checkpoint
     print(f"📂 Loading checkpoint from: {checkpoint_dir}")
@@ -85,8 +117,18 @@ def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file):
 
 
 # code for model 5 SAC/12_2/
-export_policy_torch_old_api(
-    r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC\12_2\models\sectorcr_ma_sac\best_iter_13727",
-    "shared_policy",
-    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_5.pt",
-)
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC\12_2\models\sectorcr_ma_sac\best_iter_13727",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_5.pt",
+# )
+
+
+# code for model 6 sac 12_3_nlr_server , deze model is van de nlr server getrokken
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC\12_3_NLR_server\models\best_iter_18640",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_6.pt",
+# )
+
+

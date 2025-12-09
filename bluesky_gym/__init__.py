@@ -70,7 +70,11 @@ def register_envs():
     
     # the environment of the MARL scenario
     # This creator function is what RLlib will use. It takes a config dictionary
-    # and passes it as arguments to your environment's __init__ method.
-    from bluesky_gym.envs.ma_env_SAC_new import SectorEnv
+    # # and passes it as arguments to your environment's __init__ method.
+    
+    # DIT IS NU WEG GEHAALD DUS MOET BJI ALLE MAIN.PY ERBIJ, KIJKN NAAR DE MAIN.PY VAN 
+    # from bluesky_gym.envs.ma_env_SAC_AM import SectorEnv
+    from bluesky_gym.envs.ma_env_ppo import SectorEnv
 
+    # Register for RLlib (Ray Tune)
     register_env("sector_env", lambda config: SectorEnv(**config))

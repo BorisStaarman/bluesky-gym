@@ -1,3 +1,5 @@
+--------------------------PPO----------------------------
+
 15_10 only reaches the waypoint and does not do any intrusion handling
 
 17_10 is a baseline which does not train good, but gets decent results
@@ -29,6 +31,9 @@ resultaten staan einde logboek 27_10
 29_10:
 checken 1. of de drones ooit snelheid minderen?
 deze versie is uiteindelijk gedownload en gebruikt als 'final' model
+
+9_12: denisty verhogen naar 7.7 drone density, performance kijken of t werkt
+
 
 
 ----------------------------SAC-----------------------------------------------------------
@@ -68,3 +73,11 @@ hele goeie run; SAC_5
 paar kleine aanpassingen, laatste plot wordt in 1 keer opgeslagen zodat de code gewoon uit kan runnen
 daarnaast gaat de step penalty iets omhoog omdat drones nog langzaam vliegen
 stuk meer training points
+
+------------------------------------SAC_AM----------------------------------------
+12_3 proberen alles werkend te krijgen
+12_5 werkt, performance nog slecht, met multiplicative addition
+
+12_9: observation vector verandert naar een absolute observation vector ipv relatieve observation vector. 
+nu ook werken met additive attention mechanism, met 3 attention heads. 
+PROTECTED_ZONE_M = 105  ipv 100 meter.
