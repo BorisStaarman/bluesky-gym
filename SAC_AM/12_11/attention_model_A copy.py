@@ -17,7 +17,7 @@ class AttentionSACModel(TorchModelV2, nn.Module):
 
         # 1. Configuration Dimensions
         self.ownship_dim = 7
-        self.intruder_dim = 7
+        self.intruder_dim = 5  # Changed from 7 to 5: distance, dx_rel, dy_rel, vx_rel, vy_rel
         
         # Calculate N agents based on observation space
         total_obs_dim = obs_space.shape[0]
@@ -96,9 +96,12 @@ class AttentionSACModel(TorchModelV2, nn.Module):
 
     @override(TorchModelV2)
     def forward(self, input_dict, state, seq_lens):
-        # 1. Input Handling
+        # input dict
         inputs = input_dict["obs"]
+        # extract intruders
         ownship_state = inputs[:, :self.ownship_dim]
+        
+        # extract intruder states
         intruder_end_idx = self.ownship_dim + self.expected_intruder_size
         intruder_flat = inputs[:, self.ownship_dim : intruder_end_idx]
         intruder_states = intruder_flat.view(-1, self.num_intruders, self.intruder_dim)
@@ -146,23 +149,29 @@ class AttentionSACModel(TorchModelV2, nn.Module):
             
             # Masking padding (same for all heads)
             # Check if ALL features are exactly zero (true padding), not just small values
-            is_padding = (intruder_states.abs().sum(dim=2) == 0)  # (Batch, N)
+            # IMPORTANT: Use a small epsilon for floating point comparison
+            is_padding = (intruder_states.abs().sum(dim=2) < 1e-6)  # (Batch, N)
             scores_h = scores_h.masked_fill(is_padding.unsqueeze(1), float('-inf'))
             
             # D. Softmax to get attention weights
             alpha_h = F.softmax(scores_h, dim=-1)  # (Batch, 1, N)
+            # Handle edge case: if all are masked, softmax produces nan
+            # Replace nan with 0.0 (no attention to any intruder)
             alpha_h = torch.nan_to_num(alpha_h, nan=0.0)
             
-            # DEBUG: Print attention weights for first head and first agent (once)
+            # DEBUG: Print attention weights and masking info for first head and first agent (once)
             if h == 0 and not hasattr(self, '_alpha_debug_printed'):
                 self._alpha_debug_printed = True
                 print(f"\n[ATTENTION DEBUG] Head {h}, First Agent:")
+                print(f"  Num intruders: {num_intruders}")
+                print(f"  Num padded: {is_padding[0].sum().item()}")
+                print(f"  Padding mask (first 5): {is_padding[0, :5].detach().cpu().numpy()}")
                 print(f"  Query (first 5 dims): {query_h[0, 0, :5].detach().cpu().numpy()}")
                 print(f"  Keys (first intruder, first 5 dims): {keys_h[0, 0, :5].detach().cpu().numpy()}")
-                print(f"  Keys (second intruder, first 5 dims): {keys_h[0, 1, :5].detach().cpu().numpy()}")
                 print(f"  Scores (raw, first 5 intruders): {scores_h[0, 0, :5].detach().cpu().numpy()}")
                 print(f"  Alpha weights (first 5 intruders): {alpha_h[0, 0, :5].detach().cpu().numpy()}")
                 print(f"  Alpha sum: {alpha_h[0, 0, :].sum().item()}")
+                print(f"  Alpha weights for padded slots: {alpha_h[0, 0, is_padding[0]].detach().cpu().numpy()}")
             
             attention_weights_all_heads.append(alpha_h)
             

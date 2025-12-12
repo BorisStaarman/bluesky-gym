@@ -14,45 +14,57 @@ import ray
 from ray.rllib.algorithms.algorithm import Algorithm
 from ray.rllib.algorithms.ppo import PPOConfig
 
-from ray.rllib.models import ModelCatalog
-from attention_mechanism_A import AttentionModel
-
 # Make sure these imports point to your custom environment registration
-from bluesky_gym.envs.ma_env_ppo_AM import SectorEnv
-from ray.tune.registry import register_env
+from bluesky_gym import register_envs
+from bluesky_gym.envs.ma_env_ppo import SectorEnv
 
 from run_config import RUN_ID
 
-# Register your custom environment directly for RLlib
-register_env("sector_env", lambda config: SectorEnv(**config))
-ModelCatalog.register_custom_model("d2mav_attention", AttentionModel)
+# Register your custom environment with Gymnasium
+register_envs()
 
 # --- Parameters ---
-N_AGENTS = 20  # Number of agents for training
-TOTAL_ITERS = 10  # Maximum total iterations
-TOTAL_ITERS_R = 50
-EXTRA_ITERS = 50           # When resuming, run this many more iterations
-FORCE_RETRAIN = True       # Start fresh with new hyperparameters
+# CURRICULUM LEARNING CONFIGURATION - SIMPLIFIED
+# Train ONE stage at a time. After each stage completes, update CURRENT_STAGE and 
+# LOAD_CHECKPOINT_FROM to continue with the next stage.
+
+# Which stage to train (1, 2, or 3)
+CURRENT_STAGE = 1  # Change this to 1, 2, or 3
+
+# Checkpoint to load weights from (set to None for stage 1, or paste path from previous stage)
+# Example: r"c:\Users\boris\Documents\bsgym\bluesky-gym\PPO\11_12\models\sectorcr_ma_ppo\stage_1_easy\best_iter_00001"
+LOAD_CHECKPOINT_FROM = None
+
+# Stage configurations
+STAGE_CONFIGS = {
+    1: {"n_agents": 6, "iterations": 1, "name": "stage_1_easy"},      # TESTING: 1 iteration
+    2: {"n_agents": 12, "iterations": 1, "name": "stage_2_medium"},   # TESTING: 1 iteration  
+    3: {"n_agents": 20, "iterations": 1, "name": "stage_3_hard"},     # TESTING: 1 iteration
+}
+# For full training, change iterations to:
+# 1: {"n_agents": 6, "iterations": 100, "name": "stage_1_easy"},
+# 2: {"n_agents": 12, "iterations": 150, "name": "stage_2_medium"},
+# 3: {"n_agents": 20, "iterations": 300, "name": "stage_3_hard"},
+
+FORCE_RETRAIN = True        # TESTING: Set to True to start fresh
 # Optional: Only useful if you want periodic checkpoints mid-training.
-EVALUATION_INTERVAL = 5  # e.g., set to 1 or 5 to save during training
+EVALUATION_INTERVAL = 1  # TESTING: Set to 1 to save every iteration
 
 # --- Early Stopping Parameters ---
-ENABLE_EARLY_STOPPING = True    # Set to False to disable early stopping
-EARLY_STOP_PATIENCE = 20        # Number of iterations without improvement before stopping
+ENABLE_EARLY_STOPPING = False   # TESTING: Disabled to ensure all 3 stages run
+EARLY_STOP_PATIENCE = 50        # Number of iterations without improvement before stopping (increased for 20 agents)
 EARLY_STOP_MIN_DELTA = 0.5      # Minimum improvement in smoothed reward to count as progress
 EARLY_STOP_USE_SMOOTHED = True  # Use moving average of last 5 rewards for stability
 
 # --- Metrics Directory ---
 # When copying to a new folder, update this to match your folder name!
 
+
 script_dir = os.path.dirname(os.path.abspath(__file__))
 METRICS_DIR = os.path.join(script_dir, "metrics")
+
 # --- Path for model ---
-CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_ppo")
-
-
-
-
+CHECKPOINT_BASE_DIR = os.path.join(script_dir, "models/sectorcr_ma_ppo")
 
 def _find_latest_checkpoint(base_dir: str) -> str | None:
     """Return the directory path containing algorithm_state.json with latest mtime.
@@ -60,8 +72,23 @@ def _find_latest_checkpoint(base_dir: str) -> str | None:
     Scans base_dir recursively for files named 'algorithm_state.json'. If found,
     returns the parent directory of the newest one; else returns None.
     """
+    if not os.path.exists(base_dir):
+        return None
+    
     latest_path = None
     latest_mtime = -1.0
+    
+    # First, check if base_dir itself is a checkpoint
+    base_state = os.path.join(base_dir, "algorithm_state.json")
+    if os.path.exists(base_state):
+        try:
+            mtime = os.path.getmtime(base_state)
+            latest_path = base_dir
+            latest_mtime = mtime
+        except OSError:
+            pass
+    
+    # Then scan subdirectories
     for root, dirs, files in os.walk(base_dir):
         if "algorithm_state.json" in files:
             fpath = os.path.join(root, "algorithm_state.json")
@@ -72,62 +99,74 @@ def _find_latest_checkpoint(base_dir: str) -> str | None:
             if mtime > latest_mtime:
                 latest_mtime = mtime
                 latest_path = root
+    
     return latest_path
 
-def build_trainer(n_agents):
+def build_trainer(n_agents, total_iterations):
     """Builds and configures the PPO algorithm.
     
     Args:
         n_agents: Number of agents for the environment
+        total_iterations: Total iterations for this stage (used for schedules)
     """
     def policy_map(agent_id, *_, **__):
         return "shared_policy"
+    
+    # Scale hyperparameters based on agent count
+    # For 6 agents: baseline config
+    # For 12 agents: moderate increase
+    # For 20 agents: significant increase to handle complexity
+    if n_agents <= 6:
+        train_batch_size = 32000
+        minibatch_size = 2000
+        entropy_schedule = [[0, 0.02], [total_iterations//2, 0.01], [total_iterations, 0.003]]
+    elif n_agents <= 12:
+        train_batch_size = 48000
+        minibatch_size = 3000
+        entropy_schedule = [[0, 0.02], [total_iterations//2, 0.01], [total_iterations, 0.005]]
+    else:  # 20+ agents
+        train_batch_size = 64000
+        minibatch_size = 4000
+        # Slower entropy decay to maintain exploration longer with more agents
+        entropy_schedule = [[0, 0.02], [150, 0.01], [300, 0.005]]
+    
+    # Learning rate schedule: decay to 1e-4 instead of near-zero for stability
+    lr_schedule = [[0, 1.5e-4], [total_iterations, 1e-4]]
 
     cfg = (
         PPOConfig()
-        .api_stack(
-            enable_rl_module_and_learner=False,
-            enable_env_runner_and_connector_v2=False
-        )
         .environment(
             "sector_env",
             env_config={"n_agents": n_agents,
                         "run_id": RUN_ID,
                         "metrics_base_dir": METRICS_DIR},
-            disable_env_checking=True
+            disable_env_checking=False  # Enable checking to catch environment issues
         )
         .framework("torch")
-        .env_runners(num_env_runners=os.cpu_count() - 1)
+        .env_runners(num_env_runners=os.cpu_count() - 1,
+                     num_envs_per_env_runner=1,
+                     sample_timeout_s=60.0)
         .training(
-            model={
-                "custom_model": "d2mav_attention",
-            },
-            # Conservative baseline configuration for stable initial training
-            # Batch size: moderate size for stable gradients
-            train_batch_size=32000,
-            # Network: moderate capacity to prevent overfittings
-            # model={"fcnet_hiddens": [256, 256]},  
+            # Scaled batch size for more agents
+            train_batch_size=train_batch_size,
+            # Network: moderate capacity to prevent overfitting
+            model={"fcnet_hiddens": [512, 512]},  
             # Discount and GAE: standard values
             gamma=0.99,              # Standard discount factor
             lambda_=0.95,            # Standard GAE parameter
-            # Learning rate: conservative for stability
-            lr=1.5e-4,                 # Conservative LR (RLlib default)
-            # lr = [[0, 1.5e-4], [TOTAL_ITERS, 3e-5]],
-
+            # Learning rate: decay to 1e-4 for stability (not near-zero)
+            lr=lr_schedule,
             # PPO clipping: standard conservative values
-            clip_param=0.2,          # Standard PPO clip range, higher means faster learning and less balance and more noise
+            clip_param=0.2,          # Standard PPO clip range
             vf_clip_param=10.0,      # Standard value function clip
-            # Entropy: decay from 0.01 to 0.001 over training for exploration->exploitation
-            entropy_coeff=[[0, 0.01], [TOTAL_ITERS_R, 0.003]],  # Linear decay schedule
+            # Entropy: scaled schedule based on agent count
+            entropy_coeff=entropy_schedule,
             # Gradient clipping: prevent exploding gradients
             grad_clip=0.5,           # Conservative gradient clipping
             # SGD iterations: balanced learning per batch
             num_sgd_iter=12,         # Standard number of epochs
-            #inibatch_size=1600,   # Minibatch size for SGD updates
-            
-            # train_batch_size=32000,  # Up from 24000
-            minibatch_size=2000,     # Keep ratio consistent
-
+            # Scaled minibatch size
+            minibatch_size=minibatch_size,
             # KL divergence: soft constraint for policy stability
             use_kl_loss=True,
             kl_target=0.01,          # Target KL divergence
@@ -269,85 +308,97 @@ if __name__ == "__main__":
     training_start_time = time.time()
     
     ray.shutdown()
-    ray.init(
-        runtime_env={
-            "working_dir": os.path.dirname(os.path.abspath(__file__)),
-            "excludes": [
-                "models/",       # Exclude trained model checkpoints
-                "metrics/",      # Exclude metrics data
-                "*.pkl",         # Exclude pickle files
-                "__pycache__/",  # Exclude Python cache
-            ]
-        }
-    )
-
-    # Clean up old checkpoints and metrics if force retraining
+    ray.init()
+    
+    # Get current stage configuration
+    if CURRENT_STAGE not in STAGE_CONFIGS:
+        raise ValueError(f"Invalid CURRENT_STAGE={CURRENT_STAGE}. Must be 1, 2, or 3.")
+    
+    stage = STAGE_CONFIGS[CURRENT_STAGE]
+    n_agents = stage["n_agents"]
+    target_iters = stage["iterations"]
+    stage_name = stage["name"]
+    
+    print("=" * 60)
+    print(f"🎯 TRAINING STAGE {CURRENT_STAGE}/3: {stage_name}")
+    print("=" * 60)
+    print(f"Agents: {n_agents}")
+    print(f"Iterations: {target_iters}")
+    if LOAD_CHECKPOINT_FROM:
+        print(f"Loading from: {LOAD_CHECKPOINT_FROM}")
+    else:
+        print(f"Starting with random weights (no checkpoint)")
+    print("=" * 60)
+    
+    # Set up stage-specific checkpoint directory
+    CHECKPOINT_DIR = os.path.join(CHECKPOINT_BASE_DIR, stage_name)
+    
+    # Clean up old checkpoints if force retraining
     if FORCE_RETRAIN:
-        # Delete checkpoint directory
         if os.path.exists(CHECKPOINT_DIR):
-            print(f"FORCE_RETRAIN is True. Deleting old checkpoint directory:\n{CHECKPOINT_DIR}")
+            print(f"\nFORCE_RETRAIN is True. Deleting old checkpoint directory:\n{CHECKPOINT_DIR}")
             try:
                 shutil.rmtree(CHECKPOINT_DIR)
                 print("✅ Old checkpoint directory removed.")
             except OSError as e:
                 print(f"Error: {e.strerror} - {CHECKPOINT_DIR}")
         
-        # Delete metrics directory for this run to prevent appending
-        run_metrics_dir = os.path.join(METRICS_DIR, f"run_{RUN_ID}")
-        if os.path.exists(run_metrics_dir):
-            print(f"FORCE_RETRAIN is True. Deleting old metrics directory:\n{run_metrics_dir}")
+        # Delete metrics directory for this stage
+        stage_metrics_dir = os.path.join(METRICS_DIR, f"run_{RUN_ID}", stage_name)
+        if os.path.exists(stage_metrics_dir):
+            print(f"Deleting old metrics directory:\n{stage_metrics_dir}")
             try:
-                shutil.rmtree(run_metrics_dir)
+                shutil.rmtree(stage_metrics_dir)
                 print("✅ Old metrics directory removed.")
             except OSError as e:
-                print(f"Error: {e.strerror} - {run_metrics_dir}")
+                print(f"Error: {e.strerror} - {stage_metrics_dir}")
     
-    print("-" * 30)
-
-    target_iters = None
-
-    target_iters = None
-    restored_from = None
-
-    base_state = os.path.join(CHECKPOINT_DIR, "algorithm_state.json")
-    if not FORCE_RETRAIN and os.path.exists(base_state):
-        restored_from = CHECKPOINT_DIR
-    elif not FORCE_RETRAIN:
-        # Try to find a checkpoint in subfolders (e.g., iter_00050, final_YYYYMMDD...)
-        cand = _find_latest_checkpoint(CHECKPOINT_DIR)
-        if cand:
-            restored_from = cand
-
-    if restored_from:
-        print(f"Restoring from checkpoint: {restored_from}")
-        algo = Algorithm.from_checkpoint(restored_from)
-        # Run exactly EXTRA_ITERS more beyond the restored iteration
-        target_iters = algo.iteration + max(1, int(EXTRA_ITERS))
+    print("\n" + "-" * 30)
+    
+    # Build fresh trainer with new config
+    print(f"\n🏗️  Building trainer for {n_agents} agents...")
+    algo = build_trainer(n_agents, target_iters)
+    
+    # Load weights from checkpoint if specified
+    if LOAD_CHECKPOINT_FROM:
+        if os.path.exists(LOAD_CHECKPOINT_FROM):
+            print(f"\n🔄 Loading weights from checkpoint...")
+            print(f"   Path: {LOAD_CHECKPOINT_FROM}")
+            try:
+                # Use restore() to load weights into the new config
+                algo.restore(LOAD_CHECKPOINT_FROM)
+                print(f"✅ Successfully loaded weights!")
+                print(f"   Policy network parameters transferred to {n_agents}-agent configuration")
+            except Exception as e:
+                print(f"❌ Failed to load checkpoint: {e}")
+                import traceback
+                traceback.print_exc()
+                print(f"   Continuing with randomly initialized weights...")
+        else:
+            print(f"\n⚠️  WARNING: LOAD_CHECKPOINT_FROM specified but path doesn't exist:")
+            print(f"   {LOAD_CHECKPOINT_FROM}")
+            print(f"   Starting with fresh randomly initialized weights...")
     else:
-        print("Building new trainer...")
-        print(f"Starting training with {N_AGENTS} agents")
-        algo = build_trainer(N_AGENTS)
-        # Fresh training: run up to TOTAL_ITERS
-        target_iters = int(TOTAL_ITERS)
+        print(f"\n🆕 Starting with fresh randomly initialized weights")
 
-    # Loss history for different components
-    total_loss_history = []
-    policy_loss_history = []
-    value_loss_history = []
-    entropy_loss_history = []
-    kl_divergence_history = []
-    # reward_history = []
-    reward_history = []
-    
-    # Early stopping tracking
-    best_reward = float('-inf')  # Best single-iteration reward (for saving checkpoints)
-    best_reward_iteration = 0
-    best_checkpoint_path = None
-    iterations_without_improvement = 0  # Based on smoothed reward (for stopping)
-    early_stop_triggered = False
-    
+        # Loss history for different components
+        total_loss_history = []
+        policy_loss_history = []
+        value_loss_history = []
+        entropy_loss_history = []
+        kl_divergence_history = []
+        reward_history = []
+        
+        # Early stopping tracking
+        best_reward = float('-inf')  # Best single-iteration reward (for saving checkpoints)
+        best_reward_iteration = 0
+        best_checkpoint_path = None
+        iterations_without_improvement = 0  # Based on smoothed reward (for stopping)
+        early_stop_triggered = False
+        
     # --- Main Training Loop ---
-    for i in range(algo.iteration + 1, target_iters + 1):
+    print(f"\n🏋️  Starting training loop...\n")
+    for i in range(1, target_iters + 1):
         result = algo.train()
 
         # Use RLlib new API fields
@@ -372,7 +423,7 @@ if __name__ == "__main__":
         )
         
         # Debug: Print available keys on first iteration to help troubleshoot
-        if i == algo.iteration + 1:
+        if i == 1:
             print(f"\n[DEBUG] Available learner_stats keys: {list(learner_stats.keys())}\n")
 
         # Append to history
@@ -384,36 +435,36 @@ if __name__ == "__main__":
         reward_history.append(mean_rew)
 
         # Also report reward per agent for comparability
-        mean_rew_per_agent = mean_rew / max(1, N_AGENTS)
+        mean_rew_per_agent = mean_rew / max(1, n_agents)
         print(
-            f"Iter {i}/{TOTAL_ITERS} | Mean Reward: {mean_rew:.3f}"
+            f"Stage {CURRENT_STAGE} | Iter {i}/{target_iters} | Mean Reward: {mean_rew:.3f}"
             f" (per-agent: {mean_rew_per_agent:.3f}) | Loss: {total_loss:.3f} | EpLenMean: {ep_len:.1f}"
             f" | KL: {kl_divergence:.6f}"
         )
 
-        # --- Early Stopping Check ---
+        # --- Best Checkpoint Tracking (ALWAYS ACTIVE for curriculum learning) ---
+        if not np.isnan(mean_rew) and mean_rew > best_reward:
+            best_reward = mean_rew
+            best_reward_iteration = i
+            
+            # Save checkpoint for new best reward
+            best_checkpoint_dir = os.path.join(CHECKPOINT_DIR, f"best_iter_{i:05d}")
+            checkpoint_result = algo.save(best_checkpoint_dir)
+            # Extract path from checkpoint result
+            if hasattr(checkpoint_result, 'checkpoint') and hasattr(checkpoint_result.checkpoint, 'path'):
+                best_checkpoint_path = checkpoint_result.checkpoint.path
+            else:
+                best_checkpoint_path = best_checkpoint_dir
+            
+            print(f"   ⭐ New best reward: {best_reward:.3f} (saved to {os.path.basename(best_checkpoint_path)})")
+        
+        # --- Early Stopping Check (only if enabled) ---
         if ENABLE_EARLY_STOPPING and not np.isnan(mean_rew):
             # Use smoothed reward (moving average of last 5 iterations) for early stopping decision
             if EARLY_STOP_USE_SMOOTHED and len(reward_history) >= 5:
                 smoothed_reward = np.mean(reward_history[-5:])
             else:
                 smoothed_reward = mean_rew
-            
-            # Check if current iteration has the best ACTUAL reward (for saving checkpoint)
-            if mean_rew > best_reward:
-                best_reward = mean_rew
-                best_reward_iteration = i
-                
-                # Save checkpoint for new best reward
-                best_checkpoint_dir = os.path.join(CHECKPOINT_DIR, f"best_iter_{i:05d}")
-                checkpoint_result = algo.save(best_checkpoint_dir)
-                # Extract path from checkpoint result
-                if hasattr(checkpoint_result, 'checkpoint') and hasattr(checkpoint_result.checkpoint, 'path'):
-                    best_checkpoint_path = checkpoint_result.checkpoint.path
-                else:
-                    best_checkpoint_path = best_checkpoint_dir
-                
-                print(f"   ⭐ New best reward: {best_reward:.3f} (saved to {os.path.basename(best_checkpoint_path)})")
             
             # Check for improvement in SMOOTHED reward (for early stopping patience)
             if smoothed_reward > np.mean(reward_history[-min(len(reward_history), EARLY_STOP_PATIENCE):]) + EARLY_STOP_MIN_DELTA:
@@ -448,11 +499,12 @@ if __name__ == "__main__":
                     algo, 
                     n_episodes=30, 
                     render=False, 
-                    n_agents=N_AGENTS
+                    n_agents=n_agents
                 )
                 print(
-                    "[Eval] iter=%d | avg_rew=%.3f | avg_len=%.1f | avg_intr=%.2f | wp_rate=%.1f%%"
+                    "[Eval] stage=%d iter=%d | avg_rew=%.3f | avg_len=%.1f | avg_intr=%.2f | wp_rate=%.1f%%"
                     % (
+                        CURRENT_STAGE,
                         i,
                         eval_metrics["avg_reward"],
                         eval_metrics["avg_length"],
@@ -460,53 +512,71 @@ if __name__ == "__main__":
                         eval_metrics["waypoint_rate"] * 100.0,
                     )
                 )
-                _write_eval_row(metrics=eval_metrics, iteration=i, out_dir=os.path.join(METRICS_DIR, f"run_{RUN_ID}"))
+                _write_eval_row(metrics=eval_metrics, iteration=i, out_dir=os.path.join(METRICS_DIR, f"run_{RUN_ID}", stage_name))
                 
             except Exception as e:
                 print(f"[Eval] skipped due to error: {e}")
 
-    print("\n🚀 Training finished.")
+    print(f"\n🚀 Stage {CURRENT_STAGE} training finished.")
     
-    # Early stopping summary and checkpoint handling
-    if early_stop_triggered and best_checkpoint_path:
-        print(f"   ✋ Early stopping was triggered")
-        print(f"   📊 Best reward achieved: {best_reward:.3f} at iteration {best_reward_iteration}")
-        print(f"   💾 Best checkpoint: {best_checkpoint_path}")
-        print(f"\n   ℹ️  To use the best model, restore from: {best_checkpoint_path}")
-    elif early_stop_triggered:
+    # Early stopping summary
+    if early_stop_triggered:
         print(f"   ✋ Early stopping was triggered")
         print(f"   📊 Best reward achieved: {best_reward:.3f}")
     
-    # Calculate and display total training time
-    total_training_time = time.time() - training_start_time
+    # Calculate and display stage training time
+    stage_training_time = time.time() - training_start_time
     actual_iters = len(reward_history)
-    print(f"⏱️  Total training time: {total_training_time/60:.2f} minutes ({total_training_time/3600:.2f} hours) for {actual_iters} iters.")
+    print(f"⏱️  Training time: {stage_training_time/60:.2f} minutes ({stage_training_time/3600:.2f} hours) for {actual_iters} iters.")
     
     # Save final checkpoint (current state)
     final_checkpoint_result = algo.save(CHECKPOINT_DIR)
-    # Extract just the path from the result to avoid printing massive object
     if hasattr(final_checkpoint_result, 'checkpoint') and hasattr(final_checkpoint_result.checkpoint, 'path'):
         final_path = final_checkpoint_result.checkpoint.path
     else:
         final_path = str(final_checkpoint_result)
-    print(f"✅ Final checkpoint (last iteration) saved to: {final_path}")
+    print(f"✅ Final checkpoint saved to: {final_path}")
     
-    # Summary of available checkpoints
+    # Summary and next steps
+    print(f"\n{'='*60}")
+    print(f"📁 CHECKPOINT SUMMARY - STAGE {CURRENT_STAGE}")
+    print(f"{'='*60}")
     if best_checkpoint_path:
-        print(f"\n📁 Checkpoint Summary:")
-        print(f"   • Best model (iteration {best_reward_iteration}, reward {best_reward:.3f}): {best_checkpoint_path}")
-        print(f"   • Final model (iteration {actual_iters}): {final_path}")
-        print(f"\n   💡 Tip: Use the best checkpoint for evaluation to get optimal performance!")
+        print(f"Best checkpoint (reward {best_reward:.3f}):")
+        print(f"  {best_checkpoint_path}")
+    print(f"\nFinal checkpoint:")
+    print(f"  {final_path}")
     
-    # --- Plot the Loss and Reward in a Single Figure ---
-    fig, axes = plt.subplots(3, 1, figsize=(12, 16))  # Create 3 subplots (3 rows, 1 column)
+    # Show next steps
+    if CURRENT_STAGE < 3:
+        next_stage = CURRENT_STAGE + 1
+        next_config = STAGE_CONFIGS[next_stage]
+        print(f"\n{'='*60}")
+        print(f"📋 NEXT STEPS - Continue to Stage {next_stage}")
+        print(f"{'='*60}")
+        print(f"\n1. Update the configuration at the top of main.py:")
+        print(f"\n   CURRENT_STAGE = {next_stage}")
+        if best_checkpoint_path:
+            print(f"   LOAD_CHECKPOINT_FROM = r\"{best_checkpoint_path}\"")
+        else:
+            print(f"   LOAD_CHECKPOINT_FROM = r\"{final_path}\"")
+        print(f"\n2. Run the script again to train Stage {next_stage}")
+        print(f"   ({next_config['n_agents']} agents × {next_config['iterations']} iterations)")
+        print(f"\n{'='*60}")
+    else:
+        print(f"\n{'='*60}")
+        print(f"🎉 ALL STAGES COMPLETE!")
+        print(f"{'='*60}")
+        
+        # --- Plot the Loss and Reward in a Single Figure ---
+        fig, axes = plt.subplots(3, 1, figsize=(12, 16))  # Create 3 subplots (3 rows, 1 column)
 
     # Plot Loss Components
     axes[0].plot(range(1, len(total_loss_history) + 1), total_loss_history, label="Total Loss", marker='o', linestyle='-')
     axes[0].plot(range(1, len(policy_loss_history) + 1), policy_loss_history, label="Policy Loss", marker='s', linestyle='--')
     axes[0].plot(range(1, len(value_loss_history) + 1), value_loss_history, label="Value Loss", marker='^', linestyle='-.')
     axes[0].plot(range(1, len(entropy_loss_history) + 1), entropy_loss_history, label="Entropy Loss", marker='d', linestyle=':')
-    axes[0].set_title("Loss Components Over Training Iterations")
+    axes[0].set_title(f"Loss Components - Stage {CURRENT_STAGE} ({stage_name})")
     axes[0].set_xlabel("Training Iteration")
     axes[0].set_ylabel("Loss")
     axes[0].legend()
@@ -518,11 +588,11 @@ if __name__ == "__main__":
     # Mark the best checkpoint iteration if early stopping was used
     if best_checkpoint_path and best_reward_iteration > 0:
         axes[1].axvline(x=best_reward_iteration, color='green', linestyle='--', linewidth=2, 
-                       label=f'Best Checkpoint (iter {best_reward_iteration})')
+                        label=f'Best Checkpoint (iter {best_reward_iteration})')
         axes[1].plot(best_reward_iteration, reward_history[best_reward_iteration-1], 
                     'g*', markersize=15, label=f'Best Reward: {best_reward:.2f}')
     
-    axes[1].set_title("Mean Reward Over Training Iterations")
+    axes[1].set_title(f"Mean Reward - Stage {CURRENT_STAGE} ({stage_name})")
     axes[1].set_xlabel("Training Iteration")
     axes[1].set_ylabel("Mean Reward")
     axes[1].legend()
@@ -531,14 +601,21 @@ if __name__ == "__main__":
     # Plot KL Divergence
     axes[2].plot(range(1, len(kl_divergence_history) + 1), kl_divergence_history, marker='o', linestyle='-', color='green')
     axes[2].axhline(y=0.01, color='red', linestyle='--', linewidth=1, alpha=0.7, label='KL Target (0.01)')
-    axes[2].set_title("KL Divergence Over Training Iterations")
+    axes[2].set_title(f"KL Divergence - Stage {CURRENT_STAGE} ({stage_name})")
     axes[2].set_xlabel("Training Iteration")
     axes[2].set_ylabel("KL Divergence")
     axes[2].legend()
     axes[2].grid(True)
 
-    # Adjust layout and show the figure
+    # Adjust layout and save the figure
     plt.tight_layout()
-    plt.show()
+    
+    # Save the figure to the stage directory
+    plot_path = os.path.join(script_dir, f"training_metrics_{stage_name}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    print(f"\n📊 Training metrics plot saved to: {plot_path}")
+    
+    # Close the figure to avoid displaying it
+    plt.close(fig)
 
     ray.shutdown()

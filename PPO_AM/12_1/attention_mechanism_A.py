@@ -4,50 +4,43 @@ import torch.nn as nn
 import torch.nn.functional as F
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.annotations import override
-from gymnasium import spaces
 
-class AttentionSACModel(TorchModelV2, nn.Module):
+class AttentionModel(TorchModelV2, nn.Module):
     """
-    Implementation of Multi-Head Additive (Bahdanau) Attention Architecture.
+    Implementation of Multi-Head Additive (Bahdanau) Attention Architecture for PPO.
     Uses 3 attention heads as described in the paper.
+    Adapted from SAC version with PPO-specific actor-critic structure.
     """
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
 
-        # 1. Configuration Dimensions
-        self.ownship_dim = 7
-        self.intruder_dim = 7
+        # --- CONFIGURATION ---
+        # Observation is flat: 7 ownship + 7*19 intruders = 140 dims
+        original_space = obs_space.original_space if hasattr(obs_space, "original_space") else obs_space
         
-        # Calculate N agents based on observation space
-        total_obs_dim = obs_space.shape[0]
-        self.num_intruders = (total_obs_dim - self.ownship_dim) // self.intruder_dim
-        self.expected_intruder_size = self.num_intruders * self.intruder_dim
+        # For flat observation space
+        self.ownship_dim = 7  # cos_drift, sin_drift, airspeed, dx, dy, vx, vy
+        self.intruder_dim = 7  # same features per intruder
+        self.num_intruders = 19  # NUM_AC_STATE from environment
         
         # --- Read Config ---
         custom_config = model_config.get("custom_model_config", {})
         hidden_layer_sizes = custom_config.get("hidden_dims", [256, 256])
-        self.is_critic = custom_config.get("is_critic", False)
-        
-        if isinstance(action_space, spaces.Box):
-            self.action_dim = int(np.product(action_space.shape))
-        else:
-            self.action_dim = 2 
         
         # Multi-head attention configuration
         self.attn_dim = 128
         self.num_heads = 3
-        self.head_dim = self.attn_dim // self.num_heads  # 128 / 3 = 42 (with 2 extra)
-        
-        # Adjust to make it divisible: use 42 per head, total = 126
-        self.head_dim = 42
+        self.head_dim = 42  # 126 total / 3 heads
         self.total_attn_dim = self.head_dim * self.num_heads  # 126
 
-        # 2. Pre-processing Layers
+        # --- LAYERS ---
+        
+        # 1. Pre-processing Layers
         self.ownship_fc = nn.Linear(self.ownship_dim, self.total_attn_dim)
         self.intruder_fc = nn.Linear(self.intruder_dim, self.total_attn_dim)
         
-        # --- MULTI-HEAD ATTENTION LAYERS (ADDITIVE SPECIFIC) ---
+        # 2. Multi-Head Attention Layers (Additive/Bahdanau)
         # Create separate projection matrices for each head
         self.W_q_heads = nn.ModuleList([
             nn.Linear(self.head_dim, self.head_dim, bias=True) 
@@ -78,11 +71,8 @@ class AttentionSACModel(TorchModelV2, nn.Module):
         # Project ownship embedding to standard attn_dim (128) for concatenation
         self.ownship_output_proj = nn.Linear(self.total_attn_dim, self.attn_dim)
 
-        # 3. Dynamic Hidden Layers
-        input_dim = self.attn_dim + self.attn_dim
-        
-        if self.is_critic:
-            input_dim += self.action_dim
+        # 3. Shared Backbone Layers
+        input_dim = self.attn_dim + self.attn_dim  # ownship + attention context
         
         self.hidden_layers = nn.ModuleList()
         current_dim = input_dim
@@ -90,18 +80,28 @@ class AttentionSACModel(TorchModelV2, nn.Module):
             self.hidden_layers.append(nn.Linear(current_dim, h_dim))
             current_dim = h_dim
 
-        # 4. Final Output Layer
-        self.final_layer = nn.Linear(current_dim, num_outputs if num_outputs else current_dim)
-        self._last_output_dim = num_outputs if num_outputs else current_dim
+        # 4. PPO-specific: Actor and Critic Heads
+        self.actor_head = nn.Linear(current_dim, num_outputs)
+        self.critic_head = nn.Linear(current_dim, 1)
+
+        self._value_out = None
 
     @override(TorchModelV2)
     def forward(self, input_dict, state, seq_lens):
-        # 1. Input Handling
-        inputs = input_dict["obs"]
-        ownship_state = inputs[:, :self.ownship_dim]
-        intruder_end_idx = self.ownship_dim + self.expected_intruder_size
-        intruder_flat = inputs[:, self.ownship_dim : intruder_end_idx]
-        intruder_states = intruder_flat.view(-1, self.num_intruders, self.intruder_dim)
+        # 1. Reshape flat observation into structured format
+        # Observation is flat: [7 ownship + 7*19 intruders] = 140 dims
+        flat_obs = input_dict["obs"]  # (Batch, 140)
+        batch_size = flat_obs.shape[0]
+        
+        # Split into ownship (first 7) and intruders (remaining 133)
+        ownship_state = flat_obs[:, :self.ownship_dim]  # (Batch, 7)
+        intruder_flat = flat_obs[:, self.ownship_dim:]  # (Batch, 133)
+        
+        # Reshape intruders into (Batch, N, 7)
+        intruder_states = intruder_flat.view(batch_size, self.num_intruders, self.intruder_dim)
+        
+        # Create mask: intruders are padding if all features are zero
+        mask = (intruder_states.abs().sum(dim=2) != 0).float()  # (Batch, N)
 
         # 2. Embed
         own_embed = F.leaky_relu(self.ownship_fc(ownship_state), negative_slope=0.2)  # (Batch, 126)
@@ -124,10 +124,10 @@ class AttentionSACModel(TorchModelV2, nn.Module):
         context_heads = []
         attention_weights_all_heads = []
         
-        # do for each head
+        # Convert mask to boolean: 0 means padding (should be masked)
+        is_padding = (mask == 0)  # (Batch, N)
+        
         for h in range(self.num_heads):
-            # you want to do Attention = softmax( tanh(Q + K + b )) * V
-            
             # Extract this head's embeddings
             own_h = own_embed_heads[:, h, :]  # (Batch, head_dim)
             int_h = int_embed_heads[:, h, :, :]  # (Batch, N, head_dim)
@@ -144,66 +144,49 @@ class AttentionSACModel(TorchModelV2, nn.Module):
             scores_h = torch.matmul(energy_h, self.v_att_heads[h])  # (Batch, N, 1)
             scores_h = scores_h.transpose(1, 2)  # (Batch, 1, N)
             
-            # Masking padding (same for all heads)
-            # Check if ALL features are exactly zero (true padding), not just small values
-            is_padding = (intruder_states.abs().sum(dim=2) == 0)  # (Batch, N)
+            # D. Masking padding (use PPO's mask)
             scores_h = scores_h.masked_fill(is_padding.unsqueeze(1), float('-inf'))
             
-            # D. Softmax to get attention weights
+            # E. Softmax to get attention weights
             alpha_h = F.softmax(scores_h, dim=-1)  # (Batch, 1, N)
             alpha_h = torch.nan_to_num(alpha_h, nan=0.0)
             
-            # DEBUG: Print attention weights for first head and first agent (once)
-            if h == 0 and not hasattr(self, '_alpha_debug_printed'):
-                self._alpha_debug_printed = True
-                print(f"\n[ATTENTION DEBUG] Head {h}, First Agent:")
-                print(f"  Query (first 5 dims): {query_h[0, 0, :5].detach().cpu().numpy()}")
-                print(f"  Keys (first intruder, first 5 dims): {keys_h[0, 0, :5].detach().cpu().numpy()}")
-                print(f"  Keys (second intruder, first 5 dims): {keys_h[0, 1, :5].detach().cpu().numpy()}")
-                print(f"  Scores (raw, first 5 intruders): {scores_h[0, 0, :5].detach().cpu().numpy()}")
-                print(f"  Alpha weights (first 5 intruders): {alpha_h[0, 0, :5].detach().cpu().numpy()}")
-                print(f"  Alpha sum: {alpha_h[0, 0, :].sum().item()}")
-            
             attention_weights_all_heads.append(alpha_h)
             
-            # E. Context Vector for this head
+            # F. Context Vector for this head
             context_h = torch.bmm(alpha_h, values_h).squeeze(1)  # (Batch, head_dim)
             context_heads.append(context_h)
         
         # Concatenate all heads: 3 heads × 42 dim = 126 total
         context_vector = torch.cat(context_heads, dim=1)  # (Batch, 126)
         
-        # Store attention weights for visualization (shape: num_heads × Batch × 1 × N)
-        # Average across heads for backward compatibility
+        # Store attention weights for visualization
         avg_attention = torch.stack(attention_weights_all_heads, dim=0).mean(dim=0)
         self._last_attn_weights = avg_attention.detach().cpu().numpy()
-        # Also store per-head weights for detailed analysis
         self._last_attn_weights_per_head = [alpha.detach().cpu().numpy() for alpha in attention_weights_all_heads]
         
         # ---------------------------------------------------------
         
-        # Output Projection + Tanh (projects from 126 -> 128)
+        # 4. Output Projection + Tanh (projects from 126 -> 128)
         attention_vector = torch.tanh(self.attn_output_proj(context_vector))
         
         # Project ownship embedding from 126 -> 128 for consistent concatenation
         ownship_vector = torch.tanh(self.ownship_output_proj(own_embed))
         
-        # 4. Concatenation & Network (now both are 128 dimensions)
-        if self.is_critic:
-            actions = inputs[:, intruder_end_idx:]
-            if actions.shape[1] == 0:
-                 actions = torch.zeros(inputs.shape[0], self.action_dim, device=inputs.device)
-            x = torch.cat([ownship_vector, attention_vector, actions], dim=1)
-        else:
-            x = torch.cat([ownship_vector, attention_vector], dim=1)
+        # 5. Concatenation & Shared Layers (now both are 128 dimensions)
+        x = torch.cat([ownship_vector, attention_vector], dim=1)
         
         for layer in self.hidden_layers:
             x = F.leaky_relu(layer(x), negative_slope=0.2)
-            
-        out = self.final_layer(x)
         
-        return out, state
+        # 6. PPO-specific: Compute both actor logits and critic value
+        self._features = x
+        logits = self.actor_head(self._features)
+        self._value_out = self.critic_head(self._features)
+
+        return logits, state
 
     @override(TorchModelV2)
     def value_function(self):
-        return torch.zeros(1)
+        """PPO-specific: Return the value estimate from the critic head."""
+        return self._value_out.reshape(-1)

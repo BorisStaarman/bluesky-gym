@@ -188,65 +188,137 @@ if __name__ == "__main__":
             # Compute actions - this will internally call the attention model forward
             actions_np = policy.compute_actions(obs_array, explore=True)[0]
             
-            # After compute_actions, get attention weights from the action_model
+            # After compute_actions, get attention weights from the model
             attention_model = None
-            if hasattr(policy.model, 'action_model') and hasattr(policy.model.action_model, '_last_attn_weights'):
-                attention_model = policy.model.action_model
+            attn_weights = None
+            
+            # Try different model structures to find attention weights
+            if hasattr(policy, 'model'):
+                if hasattr(policy.model, '_last_attn_weights'):
+                    attention_model = policy.model
+                    attn_weights = policy.model._last_attn_weights
+                elif hasattr(policy.model, 'action_model') and hasattr(policy.model.action_model, '_last_attn_weights'):
+                    attention_model = policy.model.action_model
+                    attn_weights = policy.model.action_model._last_attn_weights
+            
+            # Debug: Print model structure on first step
+            if episode_steps == 0 and RENDER and SHOW_ALPHA_VALUES:
+                print(f"\n[DEBUG] Policy model structure:")
+                print(f"  hasattr(policy, 'model'): {hasattr(policy, 'model')}")
+                if hasattr(policy, 'model'):
+                    print(f"  hasattr(policy.model, '_last_attn_weights'): {hasattr(policy.model, '_last_attn_weights')}")
+                    print(f"  hasattr(policy.model, 'action_model'): {hasattr(policy.model, 'action_model')}")
+                    if hasattr(policy.model, 'action_model'):
+                        print(f"  hasattr(policy.model.action_model, '_last_attn_weights'): {hasattr(policy.model.action_model, '_last_attn_weights')}")
+                print(f"  Attention weights found: {attn_weights is not None}")
+                if attn_weights is not None:
+                    print(f"  Attention weights shape: {attn_weights.shape}")
+            
+            # Debug: Check attention weights every step
+            if RENDER and SHOW_ALPHA_VALUES:
+                print(f"\n[DEBUG Step {episode_steps}] Attention weights check:")
+                print(f"  attn_weights is None: {attn_weights is None}")
+                print(f"  env.agents: {env.agents}")
+                print(f"  agent_ids: {agent_ids}")
             
             # Store attention weights in environment for visualization and plot for first agent
             if RENDER and SHOW_ALPHA_VALUES:
-                if attention_model and hasattr(attention_model, '_last_attn_weights'):
-                    attn_weights = attention_model._last_attn_weights
+                if attn_weights is not None and env.agents:
+                    print(f"[DEBUG Step {episode_steps}] INSIDE visualization block")
+                    print(f"  attn_weights shape: {attn_weights.shape}")
+                    print(f"  attn_weights min/max/mean: {attn_weights.min():.4f} / {attn_weights.max():.4f} / {attn_weights.mean():.4f}")
                     
-                    # Only plot for the first agent in the list (whichever agent is currently first)
-                    # IMPORTANT: We want to track the same agent that's shown in GREEN in the render
-                    # Green agent = env.agents[0], so we need to find its index in agent_ids
-                    green_agent = env.agents[0] if env.agents else None
+                    # Track the first agent consistently (the one shown in GREEN)
+                    green_agent = env.agents[0]  # First active agent (shown in green)
+                    print(f"  Green agent: {green_agent}")
                     
-                    if green_agent and green_agent in agent_ids:
+                    # Map attention weights for ALL agents (not just green agent) for rendering
+                    env.attention_weights = {}  # Clear previous weights
+                    
+                    # Store weights for all agents in the batch
+                    for batch_idx, agent_id in enumerate(agent_ids):
+                        if batch_idx < len(attn_weights):
+                            agent_neighbors = env.neighbor_mapping.get(agent_id, [])
+                            agent_attn_full = attn_weights[batch_idx, 0, :]  # Shape: (Num_Neighbors,)
+                            
+                            # Map each neighbor's attention weight
+                            for neigh_idx, neighbor_id in enumerate(agent_neighbors):
+                                if neigh_idx < len(agent_attn_full):
+                                    # Store with key as neighbor_id so render can display it
+                                    env.attention_weights[neighbor_id] = agent_attn_full[neigh_idx]
+                    
+                    # Find green agent's position in current observation batch for plotting
+                    if green_agent in agent_ids:
+                        print(f"[DEBUG Step {episode_steps}] Green agent FOUND in agent_ids")
                         target_idx = agent_ids.index(green_agent)
                         target_agent = green_agent
+                        print(f"  target_idx: {target_idx}, target_agent: {target_agent}")
+                        
+                        agent_attn = attn_weights[target_idx, 0, :]  # Shape: (Num_Neighbors,)
+                        print(f"  agent_attn shape: {agent_attn.shape}")
+                        print(f"  agent_attn values: {agent_attn}")
+                        
+                        # Get actual neighbor IDs and attention weights from environment
+                        neighbor_ids = env.neighbor_mapping.get(target_agent, [])
+                        num_actual_neighbors = len(neighbor_ids)
+                        print(f"  neighbor_ids: {neighbor_ids}")
+                        print(f"  num_actual_neighbors: {num_actual_neighbors}")
+                        
+                        # DEBUG: Print neighbor order on first step
+                        if episode_steps == 1:
+                            print(f"\n[DEBUG] Step {episode_steps} - Agent {target_agent} observing neighbors:")
+                            print(f"  Neighbor order (x-axis): {neighbor_ids}")
+                            print(f"  All active agents: {env.agents}")
+                            print(f"  Observing agent index in list: {env.agents.index(target_agent) if target_agent in env.agents else 'N/A'}")
+                        
+                        # Only use attention weights for actual neighbors (trim padding)
+                        agent_attn_active = agent_attn[:num_actual_neighbors]
+                        print(f"  agent_attn_active: {agent_attn_active}")
+                        print(f"[DEBUG Step {episode_steps}] About to plot...")
+                        
+                        # Plot with agent IDs on x-axis
+                        plt.clf()
+                        fig.suptitle(f'Attention Weights for {target_agent} | Step {episode_steps} | Active Neighbors: {num_actual_neighbors}', fontsize=16, fontweight='bold')
+                        ax = plt.gca()
+                        
+                        # Create x positions and labels with actual agent IDs
+                        x_positions = range(num_actual_neighbors)
+                        x_labels = neighbor_ids  # Use actual agent IDs as labels
+                        
+                        # Create bar plot with agent IDs
+                        bars = ax.bar(x_positions, agent_attn_active, color='steelblue', edgecolor='black', width=0.7)
+                        
+                        ax.set_ylim(0, 1.0)
+                        ax.set_xlim(-0.5, num_actual_neighbors - 0.5)
+                        ax.set_xticks(x_positions)
+                        ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=9)  # Rotate labels for readability
+                        ax.set_ylabel('Attention Weight (α)', fontsize=12, fontweight='bold')
+                        ax.set_xlabel('Agent ID', fontsize=12, fontweight='bold')
+                        ax.set_title(f'Observing Agent: {target_agent}', fontsize=14, fontweight='bold')
+                        ax.grid(axis='y', alpha=0.3, linestyle='--')
+                        ax.tick_params(axis='y', labelsize=10)
+                        
+                        # Add value labels for high attention weights
+                        for idx, (neighbor_id, val) in enumerate(zip(neighbor_ids, agent_attn_active)):
+                            if val > 0.05:
+                                ax.text(idx, val + 0.02, f'{val:.2f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+                        
+                        # Highlight top 3 attended neighbors with different colors
+                        if num_actual_neighbors > 0:
+                            top_3_indices = np.argsort(agent_attn_active)[-3:][::-1]  # Get indices of top 3
+                            colors = ['#d62728', '#ff7f0e', '#2ca02c']  # Red, Orange, Green
+                            for rank, idx in enumerate(top_3_indices):
+                                if idx < len(bars) and agent_attn_active[idx] > 0.01:  # Only highlight if significant
+                                    bars[idx].set_color(colors[rank])
+                                    bars[idx].set_edgecolor('black')
+                                    bars[idx].set_linewidth(2)
+                        
+                            plt.tight_layout(rect=[0, 0, 1, 0.97])
+                            plt.draw()
+                            plt.pause(0.01)
+                            print(f"[DEBUG Step {episode_steps}] Plot updated successfully!")
                     else:
-                        # Fallback: use first agent in agent_ids
-                        target_idx = 0
-                        target_agent = agent_ids[target_idx]
-                    
-                    agent_attn = attn_weights[target_idx, 0, :]  # Shape: (Num_Neighbors,) - always 19 values
-                    
-                    # Get actual number of neighbors from environment (accounts for terminated agents)
-                    num_actual_neighbors = len(env.neighbor_mapping.get(target_agent, []))
-                    
-                    # Only use attention weights for actual neighbors (trim padding)
-                    agent_attn_active = agent_attn[:num_actual_neighbors]
-                    
-                    # Map attention weights to actual neighbor agents using the neighbor mapping from env
-                    env.attention_weights = {}  # Clear previous weights
-                    if target_agent in env.neighbor_mapping:
-                        neighbor_ids = env.neighbor_mapping[target_agent]
-                        for idx, neighbor_id in enumerate(neighbor_ids):
-                            if idx < len(agent_attn):
-                                env.attention_weights[neighbor_id] = agent_attn[idx]
-                    
-                    plt.clf()
-                    fig.suptitle(f'Attention Weights for {target_agent} | Step {episode_steps} | Active Neighbors: {num_actual_neighbors}', fontsize=16, fontweight='bold')
-                    ax = plt.gca()
-                    indices = range(num_actual_neighbors)
-                    bars = ax.bar(indices, agent_attn_active, color='steelblue', edgecolor='black', width=0.7)
-                    ax.set_ylim(0, 1.0)
-                    ax.set_xlim(-0.5, num_actual_neighbors - 0.5)
-                    ax.set_xticks(range(num_actual_neighbors))
-                    ax.set_ylabel('Attention Weight', fontsize=12)
-                    ax.set_xlabel('Neighbor Index (Sorted by Distance)', fontsize=12)
-                    ax.set_title(f'Agent: {target_agent}', fontsize=14, fontweight='bold')
-                    ax.grid(axis='y', alpha=0.3, linestyle='--')
-                    ax.tick_params(labelsize=10)
-                    # Add value labels for high attention weights
-                    for idx, val in enumerate(agent_attn_active):
-                        if val > 0.05:
-                            ax.text(idx, val + 0.02, f'{val:.2f}', ha='center', va='bottom', fontsize=10)
-                    plt.tight_layout(rect=[0, 0, 1, 0.97])
-                    plt.draw()
-                    plt.pause(0.01)
+                        print(f"[DEBUG Step {episode_steps}] Green agent NOT in agent_ids")
             elif RENDER and not SHOW_ALPHA_VALUES:
                 # Clear attention weights so they don't display on aircraft
                 env.attention_weights = {}

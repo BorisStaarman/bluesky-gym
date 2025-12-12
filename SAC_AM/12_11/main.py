@@ -32,7 +32,7 @@ ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
 
 # --- Parameters ---
 N_AGENTS = 20  # Number of agents for training
-TOTAL_ITERS = 15000  # Maximum total iterations
+TOTAL_ITERS = 15000   # Maximum total iterations
 EXTRA_ITERS = 50           # When resuming, run this many more iterations
 FORCE_RETRAIN = True       # Start fresh with new hyperparameters
 # Optional: Only useful if you want periodic checkpoints mid-training.
@@ -59,8 +59,8 @@ CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac")
 class ForceAlphaCallback(DefaultCallbacks):
     def on_train_result(self, *, algorithm, result, **kwargs):
         # --- CONFIGURATION ---
-        START_ALPHA = 0.4
-        END_ALPHA = 0.1       # The "Floor" (Don't go lower than this!)
+        START_ALPHA = 0.1 # was 0.04
+        END_ALPHA = 0.05       # was 0.1. The "Floor" (Don't go lower than this!)
         DECAY_ITERS = TOTAL_ITERS * 0.65
         # DECAY_ITERS = TOTAL_ITERS/2   # How long to take to get to the floor
         

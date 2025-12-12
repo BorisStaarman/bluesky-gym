@@ -102,7 +102,9 @@ class SectorEnv(MultiAgentEnv):
         self.window_height = 512 
         self.window_size = (self.window_width, self.window_height)
         self.poly_name = 'airspace'
-        self._agent_ids = {f'kl00{i+1}'.upper() for i in range(n_agents)}
+        # Use zero-padding to ensure proper alphabetical sorting (KL0001, KL0002, ..., KL0020)
+        # Width 4 supports up to 9999 agents
+        self._agent_ids = {f'KL{str(i+1).zfill(4)}' for i in range(n_agents)}
         self.agents = []
         
         
@@ -164,8 +166,10 @@ class SectorEnv(MultiAgentEnv):
         self._intrusions_acc = {}              # per-agent intrusion counts during the episode
                 
         # Define observation and action spaces for RLlib
-        # Observation: 7 ownship features + 7 features per intruder
-        single_obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(7 + 7 * NUM_AC_STATE,), dtype=np.float32)
+        # Observation: 7 ownship features + 5 features per intruder
+        # Ownship: cos_drift, sin_drift, airspeed, x, y, vx, vy
+        # Intruder: distance, dx_rel, dy_rel, vx_rel, vy_rel
+        single_obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(7 + 5 * NUM_AC_STATE,), dtype=np.float32)
         single_action_space = spaces.Box(-1, 1, shape=(2,), dtype=np.float32)
         
         self.areas_km2 = []
@@ -448,7 +452,7 @@ class SectorEnv(MultiAgentEnv):
                 
                 rewards[agent] = (drift_reward + intrusion_reward + 
                                 progress_reward + path_efficiency_reward + 
-                                boundary_penalty + proximity_penalty + step_penalty)
+                                boundary_penalty + proximity_penalty + step_penalty) / 100.0
                 
                 # accumulate for per-episode stats
                 self._rewards_acc[agent]["drift"]     += float(drift_reward)
@@ -518,8 +522,8 @@ class SectorEnv(MultiAgentEnv):
                 pos = agent_positions.get(agent, None)
                 if pos is None:
                     continue
-                # Color: green for KL001, red for others
-                if agent == "KL001":
+                # Color: green for first agent in list, red for others
+                if agent == self.agents[0]:
                     color = (0, 255, 0)
                 else:
                     color = (200, 0, 0)
@@ -529,12 +533,15 @@ class SectorEnv(MultiAgentEnv):
                 pygame.draw.line(canvas, (0, 0, 0), pos, (pos[0] + heading_end_x, pos[1] - heading_end_y), width=4)
                 # Draw aircraft circle
                 pygame.draw.circle(canvas, color, (int(pos[0]), int(pos[1])), int(INTRUSION_DISTANCE * NM2KM * px_per_km / 2), width=2)
-                # Draw attention weight as text (if available)
+                # Draw agent ID and attention weight as text
                 if agent in self.attention_weights:
                     alpha_val = self.attention_weights[agent]
-                    alpha_text = f"{alpha_val:.2f}"
-                    text_surf = font.render(alpha_text, True, (0, 0, 0))
-                    canvas.blit(text_surf, (pos[0] + 8, pos[1] - 8))
+                    alpha_text = f"{agent} : {alpha_val:.3f}"
+                else:
+                    # Show agent ID even if no attention weight available
+                    alpha_text = f"{agent}"
+                text_surf = font.render(alpha_text, True, (0, 0, 0))
+                canvas.blit(text_surf, (pos[0] + 8, pos[1] - 8))
             except Exception:
                 continue
 
@@ -670,7 +677,8 @@ class SectorEnv(MultiAgentEnv):
         x_origin = self.center[1]
         
         # observation vector
-        dim = 7 + 7 * NUM_AC_STATE
+        # 7 ownship features + 5 features per intruder (distance, dx_rel, dy_rel, vx_rel, vy_rel)
+        dim = 7 + 5 * NUM_AC_STATE
         obs = {}
 
         if not hasattr(self, "_obs_errors"):
@@ -690,73 +698,87 @@ class SectorEnv(MultiAgentEnv):
                 airspeed = bs.traf.tas[ac_idx] / 18 # normalize on to a max of 18 m/s (~35 kt)
                 
                 # location
-                dx = bs.traf.lon[ac_idx] - x_origin / MAX_LAT_LON # normalized  difference in longitude TODO dit misschien nog * 100 doen ofzo om wat zwaarder mee te laten tellen?
-                dy = bs.traf.lat[ac_idx] - y_origin / MAX_LAT_LON # difference in latitude
+                dx = (bs.traf.lon[ac_idx] - x_origin) / MAX_LAT_LON # normalized  difference in longitude TODO dit misschien nog * 100 doen ofzo om wat zwaarder mee te laten tellen?
+                dy = (bs.traf.lat[ac_idx] - y_origin) / MAX_LAT_LON # difference in latitude
                 
                 # velocity
-                vx = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]    / 18 # normalize on to a max of 18 m/s (~35 kt)
-                vy = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]   / 18 # normalize on to a max of 18 m/s (~35 kt)
+                vx = (np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  / 18 # normalize on to a max of 18 m/s (~35 kt)
+                vy = (np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  ) / 18 # normalize on to a max of 18 m/s (~35 kt)
                 # ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
+                
+                # maybe for determining the relative position of other ac
+                # own_lat = bs.traf.lat[ac_idx]
+                # own_lon = bs.traf.lon[ac_idx]
+                # own_gs = bs.traf.gs[ac_idx]
+                # own_hdg = bs.traf.hdg[ac_idx]
 
-                # --- 2. Build Candidate List ---
+                # --- 2. Build Candidate List (in index order, no sorting) ---
                 candidates = []
-                for i in range(self.num_ac):
-                    if i == ac_idx:
+                # Get current agent ID to index mapping
+                agent_id_to_idx = {agent_id: idx for idx, agent_id in enumerate(self.agents)}
+                
+                for other_agent_id in self.agents:
+                    if other_agent_id == agent:
                         continue
-                    other_agent_id = self.agents[i] if i < len(self.agents) else None
                     
-                    wpt_lat, wpt_lon = self.agent_waypoints[i]
-                    wpt_qdr, _ = bs.tools.geo.kwikqdrdist(bs.traf.lat[i], bs.traf.lon[i], wpt_lat, wpt_lon)
-                    ac_hdg = bs.traf.hdg[i]
-                    drift = fn.bound_angle_positive_negative_180(ac_hdg - wpt_qdr)
+                    # Skip if we can't find the waypoint
+                    if other_agent_id not in self.agent_waypoints:
+                        continue
                     
-                    cos_drifti, sin_drifti = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
-                    airspeedi = bs.traf.tas[i] / 18 # normalize on to a max of 18 m/s (~35 kt)
-                
-                   
-                    # int_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[i], bs.traf.lon[i]])) * NM2KM * 1000
+                    # Get the BlueSky index for this agent
+                    i = agent_id_to_idx[other_agent_id]
                     
-                    dxi = bs.traf.lon[i] - x_origin / MAX_LAT_LON # difference in longitude TODO dit misschien nog * 100 doen ofzo om wat zwaarder mee te laten tellen?
-                    dyi = bs.traf.lat[i] - y_origin / MAX_LAT_LON # difference in latitude
+                    # Calculate absolute positions
+                    dxi_abs = (bs.traf.lon[i] - x_origin) / MAX_LAT_LON
+                    dyi_abs = (bs.traf.lat[i] - y_origin) / MAX_LAT_LON
                     
-                    # dx = float(int_loc[0] - ac_loc[0])
-                    # dy = float(int_loc[1] - ac_loc[1])
-                    
+                    # Calculate absolute velocities
                     int_hdg = bs.traf.hdg[i]
-                    vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i] /18
-                    vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i] /18
+                    vxi_abs = (np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]) / 18
+                    vyi_abs = (np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]) / 18
                     
-                    # Calculate distance between ownship and this intruder
-                    distance = float(np.hypot(dxi - dx, dyi - dy))
+                    # Make positions and velocities RELATIVE to ownship
+                    dx_rel = dxi_abs - dx  # intruder x - ownship x
+                    dy_rel = dyi_abs - dy  # intruder y - ownship y
+                    vx_rel = vxi_abs - vx  # intruder vx - ownship vx
+                    vy_rel = vyi_abs - vy  # intruder vy - ownship vy
                     
-                    # Store (distance, cos_drift, sin_drift, airspeed, dx, dy, vx, vy, agent_id)
-                    # Distance first for easy sorting, then 7 features, then ID for neighbor_mapping
-                    candidates.append((distance, cos_drifti, sin_drifti, airspeedi, dxi, dyi, vxi, vyi, other_agent_id))
+                    # Calculate distance between ownship and intruder (in nautical miles)
+                    _, distance_nm = bs.tools.geo.kwikqdrdist(
+                        bs.traf.lat[ac_idx], bs.traf.lon[ac_idx],
+                        bs.traf.lat[i], bs.traf.lon[i]
+                    )
+                    # Normalize distance (typical max ~1 NM in this scenario)
+                    distance_normalized = float(distance_nm)
+                    
+                    # Store (distance, dx_rel, dy_rel, vx_rel, vy_rel, agent_id)
+                    candidates.append((distance_normalized, dx_rel, dy_rel, vx_rel, vy_rel, other_agent_id))
 
-                # Sort by distance (closest first) - distance is at index 0
-                candidates.sort(key=lambda t: t[0])
+                # Sort by distance (closest first) and take top NUM_AC_STATE neighbors
+                candidates.sort(key=lambda x: x[0])
                 top = candidates[:NUM_AC_STATE]
-                
-                # Store neighbor mapping for attention visualization (neighbor IDs in distance order)
-                self.neighbor_mapping[agent] = [c[8] for c in top if c[8] is not None]
+                    
+                # Store neighbor mapping for attention visualization (neighbor IDs sorted by distance)
+                self.neighbor_mapping[agent] = [c[5] for c in top if c[5] is not None]
 
-                # --- 3. Construct Vector (Fix for Point 1) ---
+                # --- 3. Construct Vector ---
                 # We iterate through neighbors and append ALL features for that neighbor sequentially.
-                # This creates [Ownship, Agent1(7 features), Agent2(7 features), ...]
+                # This creates [Ownship, Agent1(5 features), Agent2(5 features), ...]
+                # Agents are sorted by distance (closest first)
                 
                 intruder_features = []
                 for i in range(NUM_AC_STATE):
                     if i < len(top):
-                        # Extract features from tuple (skip distance at index 0)
+                        # Extract features from tuple
                         t = top[i]
-                        # Indices: 0=distance, 1=cos_drift, 2=sin_drift, 3=airspeed, 4=dx, 5=dy, 6=vx, 7=vy, 8=id
-                        cos_drifti, sin_drifti, airspeedi, dxi, dyi, vxi, vyi = t[1], t[2], t[3], t[4], t[5], t[6], t[7]
+                        # Indices: 0=distance, 1=dx_rel, 2=dy_rel, 3=vx_rel, 4=vy_rel, 5=id
+                        distance, dx_rel, dy_rel, vx_rel, vy_rel = t[0], t[1], t[2], t[3], t[4]
                         
-                        # Append 7 features for this intruder
-                        intruder_features.extend([cos_drifti, sin_drifti, airspeedi, dxi, dyi, vxi, vyi])
+                        # Append 5 features for this intruder
+                        intruder_features.extend([distance, dx_rel, dy_rel, vx_rel, vy_rel])
                     else:
-                        # Padding (7 zeros per missing agent)
-                        intruder_features.extend([0.0] * 7)
+                        # Padding (5 zeros per missing agent)
+                        intruder_features.extend([0.0] * 5)
 
                 # Concatenate Ownship + Intruders
                 ownship_feats = np.array([cos_drift, sin_drift, airspeed, dx, dy, vx, vy], dtype=np.float32)
@@ -765,14 +787,14 @@ class SectorEnv(MultiAgentEnv):
                 vec = np.concatenate([ownship_feats, intruder_feats])
 
                 # Sanitize and shape-check
-                if not np.isfinite(vec).all():
-                    vec = np.nan_to_num(vec, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
+                # if not np.isfinite(vec).all():
+                #     vec = np.nan_to_num(vec, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
 
-                if vec.shape[0] != dim:
-                    fixed = np.zeros(dim, dtype=np.float32)
-                    n = min(dim, vec.shape[0])
-                    fixed[:n] = vec[:n]
-                    vec = fixed
+                # if vec.shape[0] != dim:
+                #     fixed = np.zeros(dim, dtype=np.float32)
+                #     n = min(dim, vec.shape[0])
+                #     fixed[:n] = vec[:n]
+                #     vec = fixed
 
                 obs[agent] = vec
 
@@ -785,13 +807,13 @@ class SectorEnv(MultiAgentEnv):
 
     # ---- Observation statistics helpers ----
     def _get_obs_feature_names(self):
-        dim = 7 + 7 * NUM_AC_STATE
+        dim = 7 + 5 * NUM_AC_STATE
         names = []
         # Ownship features (7 total)
         names.extend(["cos_drift", "sin_drift", "airspeed", "x", "y", "vx", "vy"])
         
-        # Intruder features (7 per intruder)
-        feature_labels = ["cos_drift", "sin_drift", "airspeed", "x", "y", "vx", "vy"]
+        # Intruder features (5 per intruder)
+        feature_labels = ["distance", "dx_rel", "dy_rel", "vx_rel", "vy_rel"]
         
         for i in range(NUM_AC_STATE):
             for label in feature_labels:
@@ -843,7 +865,7 @@ class SectorEnv(MultiAgentEnv):
             sd = std[idxs]
             # summarize with min(min), max(max), mean(mean), mean(std)
             print(f"  {label:10s}  min=[{mn.min(): .3f}]  max=[{mx.max(): .3f}]  mean=[{mu.mean(): .3f}]  std~[{sd.mean(): .3f}]")
-        # indices per block - ownship has 7 features now
+        # indices per block - ownship has 7 features
         i0 = 0
         pr_range("cos_drift", slice(i0, i0+1)); i0 += 1
         pr_range("sin_drift", slice(i0, i0+1)); i0 += 1
@@ -852,8 +874,8 @@ class SectorEnv(MultiAgentEnv):
         pr_range("y", slice(i0, i0+1)); i0 += 1
         pr_range("vx", slice(i0, i0+1)); i0 += 1
         pr_range("vy", slice(i0, i0+1)); i0 += 1
-        # 7 features per intruder (NUM_AC_STATE intruders)
-        labels = ["cos_drift", "sin_drift", "airspeed", "x", "y", "vx", "vy"]
+        # 5 features per intruder (NUM_AC_STATE intruders)
+        labels = ["distance", "dx_rel", "dy_rel", "vx_rel", "vy_rel"]
         for lab in labels:
             pr_range(f"intruder_{lab}", slice(i0, i0+NUM_AC_STATE))
             i0 += NUM_AC_STATE
