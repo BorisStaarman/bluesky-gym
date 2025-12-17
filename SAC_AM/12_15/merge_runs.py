@@ -3,7 +3,7 @@ from run_config import RUN_ID
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 repo_root = os.path.dirname(os.path.dirname(script_dir))
-root = os.path.join(repo_root, "metrics", f"run_{RUN_ID}")
+root = os.path.join(script_dir, "metrics", f"run_{RUN_ID}")
 
 dfs = []
 for path in glob.glob(os.path.join(root, "pid_*", "*.csv")):
@@ -19,3 +19,5 @@ all_df.sort_values(["finished_at", "agent", "episode_index"], inplace=True)
 out = os.path.join(root, "all_agents_merged_sorted.csv")
 all_df.to_csv(out, index=False)
 print(f"Wrote {out} with {len(all_df)} rows")
+
+

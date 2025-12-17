@@ -25,7 +25,7 @@ register_envs()
 
 # --- Parameters ---
 N_AGENTS = 20  # Number of agents for training
-TOTAL_ITERS = 20  # Maximum total iterations
+TOTAL_ITERS = 250  # Maximum total iterations
 TOTAL_ITERS_R = 50
 EXTRA_ITERS = 50           # When resuming, run this many more iterations
 FORCE_RETRAIN = True       # Start fresh with new hyperparameters
@@ -34,7 +34,7 @@ EVALUATION_INTERVAL = 5  # e.g., set to 1 or 5 to save during training
 
 # --- Early Stopping Parameters ---
 ENABLE_EARLY_STOPPING = True    # Set to False to disable early stopping
-EARLY_STOP_PATIENCE = 20        # Number of iterations without improvement before stopping
+EARLY_STOP_PATIENCE = 251       # Number of iterations without improvement before stopping
 EARLY_STOP_MIN_DELTA = 0.5      # Minimum improvement in smoothed reward to count as progress
 EARLY_STOP_USE_SMOOTHED = True  # Use moving average of last 5 rewards for stability
 
@@ -102,12 +102,12 @@ def build_trainer(n_agents):
             lr = [[0, 1.5e-4], [TOTAL_ITERS, 3e-5]],
 
             # PPO clipping: standard conservative values
-            clip_param=0.2,          # Standard PPO clip range, higher means faster learning and less balance and more noise
+            clip_param=0.3,          # Standard PPO clip range, higher means faster learning and less balance and more noise
             vf_clip_param=10.0,      # Standard value function clip
             # Entropy: decay from 0.01 to 0.001 over training for exploration->exploitation
             
             # entropy_coeff=[[0, 0.01], [TOTAL_ITERS_R, 0.003]],  # Linear decay schedule
-            entropy_coeff=[[0, 0.02], [150, 0.005], [300, 0.001]],  # More exploration early on
+            entropy_coeff=[[0, 0.02], [150, 0.005], [TOTAL_ITERS, 0.001]],  # More exploration early on
             
             # Gradient clipping: prevent exploding gradients
             grad_clip=0.5,           # Conservative gradient clipping

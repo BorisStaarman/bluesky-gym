@@ -8,7 +8,7 @@ import math
 # get the path to the .csv file
 script_dir = os.path.dirname(os.path.abspath(__file__))
 repo_root = os.path.dirname(os.path.dirname(script_dir))
-root = os.path.join(repo_root, "metrics_29_10", f"run_{RUN_ID}", "all_agents_merged_sorted.csv")
+root = os.path.join(repo_root, "metrics", f"run_{RUN_ID}", "all_agents_merged_sorted.csv")
 df = pd.read_csv(root)
 
 # --- Finished-at summary ---
@@ -38,12 +38,12 @@ episode_df = df.groupby('episode_index').agg({
     'mean_reward_drift': 'mean',
     'mean_reward_progress': 'mean',
     'mean_reward_intrusion': 'mean',
-    'mean_reward_proximity': 'mean',
+    # 'mean_reward_proximity': 'mean',
     'sum_reward_drift': 'mean',
     'sum_reward_progress': 'mean',
     'sum_reward_intrusion': 'mean',
-    'sum_reward_proximity': 'mean',
-    'total_intrusions': 'sum'
+    # 'sum_reward_proximity': 'mean',
+    # 'total_intrusions': 'sum'
 }).reset_index()
 
 print(f"\nAnalyzing {len(episode_df)} completed episodes")

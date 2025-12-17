@@ -20,4 +20,6 @@ metrics_*/
 
 # dont push all sac metrics
 SAC/**/metrics/
+SAC_AM/**/metrics/
 PPO/**/metrics/
+PPO_AM/**/metrics/

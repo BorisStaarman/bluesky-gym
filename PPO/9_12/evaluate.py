@@ -23,7 +23,7 @@ register_envs()
 MpS2Kt = 1.94384
 
 # --- Parameters for Evaluation ---
-N_AGENTS = 6  # The number of agents the model was trained with
+N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
 # RENDER = False # Set to True to watch the agent play
 NUM_EVAL_EPISODES = 20  # How many episodes to run for evaluation

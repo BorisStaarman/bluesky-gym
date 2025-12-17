@@ -81,3 +81,5 @@ stuk meer training points
 12_9: observation vector verandert naar een absolute observation vector ipv relatieve observation vector. 
 nu ook werken met additive attention mechanism, met 3 attention heads. 
 PROTECTED_ZONE_M = 105  ipv 100 meter.
+
+12_11:
