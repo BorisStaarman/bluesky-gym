@@ -18,7 +18,7 @@ CENTER = np.array([52.362566, 4.881444]) # new center from training scenario
 ALTITUDE = 360
 AC_SPD = 0 # starting speed, in m/s !
 AC_TYPE = "m600"
-INTRUSION_DISTANCE = 1 / 1852 * 50  # was 0.054
+INTRUSION_DISTANCE = 1 / 1852 * 100  # was 0.054
 COLLISION_DISTANCE = 1 / 1852 * 100  # 100 meters - collision threshold (terminates both aircraft)
 
 # conversion factors
@@ -28,7 +28,7 @@ FT2M = 0.3048
 
 # model settings
 ACTION_FREQUENCY = 1 # how many sim steps per action
-NUM_AC_STATE = 3 # number of aircraft in observation vector
+NUM_AC_STATE = 4 # number of aircraft in observation vector
 MAX_STEPS = 400 # max steps per episode
 
 # penalties for reward

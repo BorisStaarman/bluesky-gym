@@ -83,3 +83,27 @@ nu ook werken met additive attention mechanism, met 3 attention heads.
 PROTECTED_ZONE_M = 105  ipv 100 meter.
 
 12_11:
+<<<<<<< Updated upstream
+=======
+12_9 werkte nog steeds niet goed. nu de observation vector toch wel relatief maken van elkaar!
+nu de sorting op de distance eruit halen. 
+eerst proberen trainen op wat minder agents. 
+kleinere obersvation vector voor intruder, van 7 naar 5. 
+
+
+
+
+
+
+--------------------------------------Two_Stage -----------------------------------------
+12_11 
+first of the two stage algorithme proberen te laten werken
+waypoint worden gereached, alleen er zijn nog veel intrusions
+
+12_16
+dit heb ik getraind op de 'oude' cpa risk parameters. op zich gaat performance prima. 
+nadat ik de cpa risk parameters heb aangepast gaat, de performance nog veel beter. drones botsen bijna al niet meer. 
+
+12_16_2
+nu trainen we hetzelfde stage 1 ding op de nieuwe cpa_risk parameters. ook zetten we de inrusion distance op 105 meter met het trainen. dit zou de performance
+tijdens evaluatie nog wel stukkie beter moeten laten worden. 

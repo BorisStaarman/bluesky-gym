@@ -29,17 +29,23 @@ register_envs()
 # LOAD_CHECKPOINT_FROM to continue with the next stage.
 
 # Which stage to train (1, 2, or 3)
-CURRENT_STAGE = 1  # Change this to 1, 2, or 3
+# CURRENT_STAGE = 1  # Change this to 1, 2, or 3
 
 # Checkpoint to load weights from (set to None for stage 1, or paste path from previous stage)
 # Example: r"c:\Users\boris\Documents\bsgym\bluesky-gym\PPO\11_12\models\sectorcr_ma_ppo\stage_1_easy\best_iter_00001"
-LOAD_CHECKPOINT_FROM = None
+
+# CHANGE THIS TO THE PATH OF PREVIOUS STAGE BEST RUN IF NOT STAGE 1
+# checkpoint for stage 2
+CURRENT_STAGE = 2
+LOAD_CHECKPOINT_FROM = r"c:\Users\boris\Documents\bsgym\bluesky-gym\PPO\11_12\models\sectorcr_ma_ppo\stage_1_easy\best_iter_00080"
+# checkpoint for stage 3
+# LOAD_CHECKPOINT_FROM = r"c:\Users\boris\Documents\bsgym\bluesky-gym\PPO\11_12\models\sectorcr_ma_ppo\stage_2_medium\best_iter_00001"
 
 # Stage configurations
 STAGE_CONFIGS = {
-    1: {"n_agents": 6, "iterations": 1, "name": "stage_1_easy"},      # TESTING: 1 iteration
-    2: {"n_agents": 12, "iterations": 1, "name": "stage_2_medium"},   # TESTING: 1 iteration  
-    3: {"n_agents": 20, "iterations": 1, "name": "stage_3_hard"},     # TESTING: 1 iteration
+    1: {"n_agents": 6, "iterations": 100, "name": "stage_1_easy"},      # TESTING: 1 iteration
+    2: {"n_agents": 12, "iterations": 100, "name": "stage_2_medium"},   # TESTING: 1 iteration  
+    3: {"n_agents": 20, "iterations": 100, "name": "stage_3_hard"},     # TESTING: 1 iteration
 }
 # For full training, change iterations to:
 # 1: {"n_agents": 6, "iterations": 100, "name": "stage_1_easy"},
@@ -48,7 +54,7 @@ STAGE_CONFIGS = {
 
 FORCE_RETRAIN = True        # TESTING: Set to True to start fresh
 # Optional: Only useful if you want periodic checkpoints mid-training.
-EVALUATION_INTERVAL = 1  # TESTING: Set to 1 to save every iteration
+EVALUATION_INTERVAL = 10  # TESTING: Set to 1 to save every iteration
 
 # --- Early Stopping Parameters ---
 ENABLE_EARLY_STOPPING = False   # TESTING: Disabled to ensure all 3 stages run
@@ -395,6 +401,23 @@ if __name__ == "__main__":
         best_checkpoint_path = None
         iterations_without_improvement = 0  # Based on smoothed reward (for stopping)
         early_stop_triggered = False
+    
+    # Ensure history and early-stopping variables are defined even when loading a checkpoint.
+    # When restoring from a checkpoint the user may still want to track the current run's metrics.
+    try:
+        total_loss_history
+    except NameError:
+        total_loss_history = []
+        policy_loss_history = []
+        value_loss_history = []
+        entropy_loss_history = []
+        kl_divergence_history = []
+        reward_history = []
+        best_reward = float('-inf')
+        best_reward_iteration = 0
+        best_checkpoint_path = None
+        iterations_without_improvement = 0
+        early_stop_triggered = False
         
     # --- Main Training Loop ---
     print(f"\n🏋️  Starting training loop...\n")
@@ -569,9 +592,14 @@ if __name__ == "__main__":
         print(f"{'='*60}")
         
         # --- Plot the Loss and Reward in a Single Figure ---
-        fig, axes = plt.subplots(3, 1, figsize=(12, 16))  # Create 3 subplots (3 rows, 1 column)
-
     # Plot Loss Components
+        # Ensure `axes` exists (created earlier only when all stages complete). Create if missing.
+        try:
+            axes
+        except NameError:
+            fig, axes = plt.subplots(3, 1, figsize=(12, 16))  # Create 3 subplots (3 rows, 1 column)
+
+        # Plot Loss Components
     axes[0].plot(range(1, len(total_loss_history) + 1), total_loss_history, label="Total Loss", marker='o', linestyle='-')
     axes[0].plot(range(1, len(policy_loss_history) + 1), policy_loss_history, label="Policy Loss", marker='s', linestyle='--')
     axes[0].plot(range(1, len(value_loss_history) + 1), value_loss_history, label="Value Loss", marker='^', linestyle='-.')

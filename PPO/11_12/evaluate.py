@@ -23,7 +23,7 @@ register_envs()
 MpS2Kt = 1.94384
 
 # --- Parameters for Evaluation ---
-N_AGENTS = 6  # The number of agents the model was trained with
+N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
 # RENDER = False # Set to True to watch the agent play
 NUM_EVAL_EPISODES = 20  # How many episodes to run for evaluation
@@ -33,8 +33,12 @@ RENDER = True # Set to True to watch the agent play
 script_dir = os.path.dirname(os.path.abspath(__file__))
 BASE_CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_ppo")
 
+# final checkpoint from trianing: c:\Users\boris\Documents\bsgym\bluesky-gym\PPO\11_12\models/sectorcr_ma_ppo\stage_3_hard\best_iter_00001
+# BASE_CHECKPOINTs_DIR
+best_checkpoint = r"c:\Users\boris\Documents\bsgym\bluesky-gym\PPO\11_12\models\sectorcr_ma_ppo\stage_3_hard\best_iter_00001"
+
 # --- CHOOSE WHICH CHECKPOINT TO EVALUATE ---
-USE_BEST_CHECKPOINT = True  # Set to True to use best checkpoint, False for final checkpoint
+USE_BEST_CHECKPOINT = False  # Set to True to use best checkpoint, False for final checkpoint
 
 def find_best_checkpoint(base_dir):
     """Find the best checkpoint (best_iter_XXXXX) in the checkpoint directory."""
@@ -56,18 +60,75 @@ def find_best_checkpoint(base_dir):
     # Return the most recent best checkpoint
     return os.path.join(base_dir, best_checkpoints[0])
 
+
+def _is_valid_rllib_checkpoint_dir(dirpath: str) -> bool:
+    """Return True if the directory contains files that look like an RLlib checkpoint."""
+    try:
+        for fname in os.listdir(dirpath):
+            if fname == "rllib_checkpoint.json":
+                return True
+            if fname.startswith("algorithm_state"):
+                return True
+            if fname.startswith("checkpoint-"):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def find_checkpoint_recursive(base_dir: str) -> str | None:
+    """Recursively search base_dir for the newest directory that looks like an RLlib checkpoint.
+
+    Returns the directory path or None if nothing found.
+    """
+    if not os.path.exists(base_dir):
+        return None
+
+    candidates = []
+    for root, dirs, files in os.walk(base_dir):
+        if _is_valid_rllib_checkpoint_dir(root):
+            try:
+                mtime = os.path.getmtime(root)
+            except OSError:
+                mtime = 0
+            candidates.append((mtime, root))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
 # Determine which checkpoint to use
 if USE_BEST_CHECKPOINT:
+    # First try to find a `best_iter_*` folder directly under the base dir (backwards-compatible)
     best_checkpoint = find_best_checkpoint(BASE_CHECKPOINT_DIR)
-    if best_checkpoint:
+    if best_checkpoint and _is_valid_rllib_checkpoint_dir(best_checkpoint):
         CHECKPOINT_DIR = best_checkpoint
         print(f"🌟 Using BEST checkpoint: {os.path.basename(CHECKPOINT_DIR)}")
     else:
-        CHECKPOINT_DIR = BASE_CHECKPOINT_DIR
-        print(f"⚠️  No best checkpoint found, using final checkpoint")
+        # Fallback: search recursively for any valid RLlib checkpoint directory under the base dir
+        recursive = find_checkpoint_recursive(BASE_CHECKPOINT_DIR)
+        if recursive:
+            CHECKPOINT_DIR = recursive
+            print(f"🌟 Using discovered checkpoint: {os.path.relpath(CHECKPOINT_DIR, script_dir)}")
+        else:
+            CHECKPOINT_DIR = BASE_CHECKPOINT_DIR
+            print(f"⚠️  No valid checkpoint found under {BASE_CHECKPOINT_DIR}. Using base path")
 else:
-    CHECKPOINT_DIR = BASE_CHECKPOINT_DIR
-    print(f"📁 Using FINAL checkpoint")
+    # If the base path itself is a valid RLlib checkpoint directory, use it.
+    if _is_valid_rllib_checkpoint_dir(BASE_CHECKPOINT_DIR):
+        CHECKPOINT_DIR = BASE_CHECKPOINT_DIR
+        print(f"📁 Using FINAL checkpoint (base dir contains RLlib checkpoint)")
+    else:
+        # Otherwise search recursively for actual checkpoint directories saved under stage subfolders
+        recursive = find_checkpoint_recursive(BASE_CHECKPOINT_DIR)
+        if recursive:
+            CHECKPOINT_DIR = recursive
+            print(f"📁 Using discovered checkpoint: {os.path.relpath(CHECKPOINT_DIR, script_dir)}")
+        else:
+            CHECKPOINT_DIR = BASE_CHECKPOINT_DIR
+            print(f"📁 Using FINAL checkpoint (no RLlib checkpoint found under base path)")
 
 
 if __name__ == "__main__":
