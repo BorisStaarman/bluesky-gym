@@ -12,3 +12,4 @@ from bluesky_gym.envs.ma_env_SAC import *
 from bluesky_gym.envs.ma_env_SAC_new import *
 from bluesky_gym.envs.ma_env_SAC_AM import *
 from bluesky_gym.envs.ma_env_two_stage import *
+from bluesky_gym.envs.ma_env_two_stage_AM import *
