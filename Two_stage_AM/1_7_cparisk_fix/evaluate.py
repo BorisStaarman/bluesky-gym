@@ -1,22 +1,44 @@
 # standard imports
 import os
-import numpy as np
-import torch
+import sys
+import shutil
+import csv
 import matplotlib.pyplot as plt
+import numpy as np
 import time
-import bluesky as bs
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
+import io
+
+# Add the script directory to Python path so Ray workers can find attention_model_A
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
 
 # MARL ray imports
 import ray
 from ray.rllib.algorithms.algorithm import Algorithm
+from ray.rllib.algorithms.ppo import PPOConfig
+from ray.rllib.models import ModelCatalog
+from attention_model_A import AttentionSACModel # additive method
 
-# Make sure these imports point to your custom environment files
-from bluesky_gym.envs.ma_env_two_stage import SectorEnv  # Use two_stage environment
-from bluesky_gym import register_envs
+from bluesky_gym.envs.ma_env_two_stage_AM import SectorEnv
+from ray.tune.registry import register_env
+
+import torch
+import torch.nn.functional as F
+
+from ray.rllib.algorithms.callbacks import DefaultCallbacks
+from ray.rllib.policy.sample_batch import SampleBatch
+
+
 from run_config import RUN_ID
 
 # Register your custom environment with Gymnasium
-register_envs()
+# Register your custom environment directly for RLlib
+register_env("sector_env", lambda config: SectorEnv(**config))
+ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
+
+# Register your custom environment with Gymnasium
 
 # Conversion factor from meters per second to knots
 MpS2Kt = 1.94384
@@ -24,13 +46,11 @@ MpS2Kt = 1.94384
 NM2KM = 1.852
 
 # --- Parameters for Evaluation ---
-N_AGENTS = 5  # The number of agents the model was trained with
-
-NUM_EVAL_EPISODES = 5  # How many episodes to run for evaluation
+N_AGENTS = 20  # The number of agents the model was trained with
+# NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
+# RENDER = False # Set to True to watch the agent play
+NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
 RENDER = True # Set to True to watch the agent play
-
-# NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
-# RENDER = True # Set to True to watch the agent play
 
 # This path MUST match the checkpoint directory from your main.py training script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -57,7 +77,11 @@ if __name__ == "__main__":
     # Initialize Ray
     os.environ["TENSORBOARD"] = "0"   # ✅ Prevent auto-launch
     ray.shutdown()
-    ray.init(include_dashboard=False)
+    # ray.init(include_dashboard=False)
+    ray.init(runtime_env={
+        "working_dir": script_dir,
+        "py_modules": [os.path.join(script_dir, "attention_model_A.py")],
+    })
 
     # --- Check if a checkpoint exists ---
     if not os.path.exists(CHECKPOINT_DIR):

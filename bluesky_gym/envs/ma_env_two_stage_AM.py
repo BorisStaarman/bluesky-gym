@@ -187,6 +187,13 @@ class SectorEnv(MultiAgentEnv):
         
         # Track maximum risk value (before capping)
         self.max_risk_uncapped = 0.0
+        
+        # Track maximum observation values for normalization analysis
+        self.max_d_now = 0.0
+        self.max_dx = 0.0
+        self.max_dy = 0.0
+        self.max_dvx = 0.0
+        self.max_dvy = 0.0
 
     @staticmethod
     def compute_relative_position(center, lat, lon):
@@ -211,6 +218,15 @@ class SectorEnv(MultiAgentEnv):
         # episode counters
         self._episode_index += 1
         self._env_step = 0
+        
+        # Print max observation values for normalization analysis (every 100 episodes)
+        if self._episode_index % 100 == 0:
+            print(f"\n[Episode {self._episode_index}] Max observation values:")
+            print(f"  max_d_now:  {self.max_d_now:.4f} m")
+            print(f"  max_dx:     {self.max_dx:.4f} m")
+            print(f"  max_dy:     {self.max_dy:.4f} m")
+            print(f"  max_dvx:    {self.max_dvx:.4f} m/s")
+            print(f"  max_dvy:    {self.max_dvy:.4f} m/s")
         # for savin  data in csv file
         self._agent_steps = {a: 0 for a in self.agents}
         self._rewards_acc = {a: {"drift": 0.0, "progress": 0.0, "intrusion": 0.0, "proximity": 0.0} for a in self.agents}
@@ -905,85 +921,77 @@ class SectorEnv(MultiAgentEnv):
     #         print(f"[RISK] New maximum uncapped risk: {self.max_risk_uncapped:.6f}")
         
     #     return float(np.clip(total_risk, 0.0, 1.0))
-    def _cpa_risk(self, dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
+    def _cpa_risk(dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
             k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2):
-        EPS = 1e-6  # to avoid div by zero
+        """
+        Calculate collision risk based on Closest Point of Approach (CPA).
         
-        diverge_penalty = 0.1
-        hit_scale = 0.6  # was 0.4
-        w_d = 0.6 # was 1.2 
-        k = 0.2 # was 0.2
-        distance_factor = 0.15 # was 0.3, higher means more influence of distance penalty
-
-        # Step 1: Compute relative position and velocity
-        rv = dx * dvx + dy * dvy  # relative position dot relative velocity
+        Returns a risk value between 0.0 (no threat) and 1.0 (imminent collision).
+        Only considers APPROACHING aircraft within the time horizon.
+        """
+        EPS = 1e-6
+        
+        # time horizon parameter
+        T = 20.0  # put to 20 seconds
+        min_length = 750.0 #put to 750.meters
+        
+        # Step 1: Basic calculations
+        rv = dx * dvx + dy * dvy  # dot product: <0 if approaching, >0 if diverging
         v2 = dvx * dvx + dvy * dvy  # relative speed squared
-        r2 = dx * dx + dy * dy  # relative distance squared
-
-        # Step 2: Handle case with no relative motion (v2 < EPS)
-        if v2 < EPS:
-            t_cpa = 0.0  # no CPA
-            d_cpa = float(np.hypot(dx, dy))  # Euclidean distance
-            approaching = False  # not moving toward each other
-            speed_mag = 0.0  # no relative speed
-        else:
-            speed_mag = float(np.sqrt(v2))  # speed magnitude
-            t_cpa = -rv / v2  # time to CPA
-            t_cpa = float(np.clip(t_cpa, 0.0, T))  # clip to [0, T]
-            d_cpa = float(np.hypot(dx + dvx * t_cpa, dy + dvy * t_cpa))  # distance at CPA
-            approaching = (rv < 0.0)  # moving toward each other
-
-        # Step 3: Calculate the time urgency factor (0 at horizon, 1 now)
-        time_factor = 1.0 - (t_cpa / (T + EPS))
-
-        # Step 4: Distance factor using a sigmoid function centered at R (protected zone)
-        soft = max(EPS, k * R)  # avoid div-by-zero
-        dist_factor = 1.0 / (1.0 + np.exp((d_cpa - R) / soft))  # smooth sigmoid decay for distance
-
-        # Step 5: Closing speed factor (normalized), only counts if approaching
-        if r2 < EPS or v2 < EPS:
-            closing_norm = 0.0
-        else:
-            closing_speed = max(0.0, -rv / (np.sqrt(r2) + EPS))  # m/s toward each other
-            closing_norm = closing_speed / (speed_mag + EPS)  # normalize to ~0..1
-
-        # Step 6: True collision check (optional, solve the quadratic for potential collision)
-        hit_bonus = 0.0
-        if v2 >= EPS:
-            a = v2
-            b = 2.0 * rv
-            c = r2 - R**2 # make R bit bigger to be more save
-            disc = b * b - 4 * a * c
-            if disc >= 0.0:
-                s = float(np.sqrt(disc))
-                t1 = (-b - s) / (2 * a)
-                t2 = (-b + s) / (2 * a)
-                # first future intersection within horizon (if any)
-                candidates = [t for t in (t1, t2) if 0.0 <= t <= T]
-                if candidates:
-                    t_hit = min(candidates)
-                    # bonus scales with how soon the hit occurs
-                    hit_bonus = hit_scale * (1.0 - t_hit / (T + EPS))  # 0..0.2
-
-        # Step 7: Distance penalty - closer agents get a higher penalty
-        current_distance = float(np.sqrt(r2))  # current separation distance
-        distance_penalty = min(1.0, current_distance / (2 * R))  # 0 at contact, 1 at 4*R+
-
-        # Step 8: Combine the factors (weighted sum)
-        risk = (w_d * float(dist_factor)
-                + w_t * float(time_factor)
-                + w_c * float(closing_norm)
-                + float(hit_bonus))
-
-        # Step 9: Apply the distance penalty - closer threats have higher priority
-        risk *= (1.0 - distance_factor * distance_penalty)  # reduce risk for distant threats
-
-        # Step 10: Penalize if agents are diverging (moving away from each other)
-        if not approaching:
-            risk *= diverge_penalty  # down-weight if moving apart
-
-        # Step 11: Clamp risk to [0, 1]
-        return float(max(0.0, min(1.0, risk)))  # Return the normalized risk value between 0 and 1
+        r2 = dx * dx + dy * dy  # current distance squared
+        current_distance = float(np.sqrt(r2))
+        
+        # Step 2: Early exit if not moving or diverging (moving apart/parallel)
+        # This is the most important filter - only care about approaching aircraft
+        if v2 < EPS or rv >= -EPS:  # rv >= 0 means diverging
+            return 0.0
+        
+        # Step 3: Calculate time to CPA (only valid for approaching aircraft)
+        speed_mag = float(np.sqrt(v2))
+        t_cpa = -rv / v2  # Will be positive since rv < 0
+        
+        # Step 4: Early exit if CPA is beyond time horizon or in the past
+        if t_cpa < 0.0 or t_cpa > T:
+            return 0.0
+        
+        # Step 5: Calculate distance at CPA
+        d_cpa = float(np.hypot(dx + dvx * t_cpa, dy + dvy * t_cpa))
+        
+        # Step 6: Early exit if CPA distance is very safe (beyond 5x protected zone)
+        if d_cpa > min_length:  # > 500m at closest point - no threat
+            return 0.0
+        
+        # Step 7: Calculate risk components for potential threats
+        
+        # Time urgency: 1.0 when CPA is now, 0.0 when CPA is at horizon
+        # More urgent when CPA happens sooner
+        time_urgency = 1.0 - (t_cpa / T)
+        
+        # Distance threat: How close will they get?
+        # 1.0 when d_cpa = 0 (collision), decays smoothly toward 0 at 5*R
+        # Using sigmoid centered at R with width 0.4*R for smooth transition
+        distance_threat = 1.0 / (1.0 + np.exp((d_cpa - R) / (0.4 * R)))
+        
+        # Closing speed factor: How fast are they converging?
+        # Normalized to typical speeds (20 m/s ~= 40 knots)
+        closing_speed = -rv / (current_distance + EPS)  # m/s toward each other
+        closing_factor = float(np.clip(closing_speed / 30.0, 0.0, 1.0))
+        
+        # Current distance factor: Prioritize threats that are already close
+        # Scale from 1.0 (at protected zone) to 0.0 (at 5*R)
+        proximity_factor = 1.0 - float(np.clip((current_distance - R) / (4.0 * R), 0.0, 1.0))
+        
+        # Step 8: Combine factors with weights
+        # Distance threat is most important (50%)
+        # Time urgency is second (25%) 
+        # Current proximity is third (15%)
+        # Closing speed is fourth (10%)
+        risk = (0.50 * distance_threat + 
+                0.25 * time_urgency + 
+                0.15 * proximity_factor +
+                0.10 * closing_factor)
+        
+        return float(np.clip(risk, 0.0, 1.0))
 
 
 
@@ -1176,13 +1184,13 @@ class SectorEnv(MultiAgentEnv):
                 airspeed = bs.traf.tas[ac_idx] / 18 # normalize on to a max of 18 m/s (~35 kt)
                 
                 # location
-                dx = (bs.traf.lon[ac_idx] - x_origin) / MAX_LAT_LON # normalized  difference in longitude TODO dit misschien nog * 100 doen ofzo om wat zwaarder mee te laten tellen?
-                dy = (bs.traf.lat[ac_idx] - y_origin) / MAX_LAT_LON # difference in latitude
+                # dx = (bs.traf.lon[ac_idx] - x_origin) / MAX_LAT_LON # normalized  difference in longitude TODO dit misschien nog * 100 doen ofzo om wat zwaarder mee te laten tellen?
+                # dy = (bs.traf.lat[ac_idx] - y_origin) / MAX_LAT_LON # difference in latitude
                 
                 # velocity
-                vx = (np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  / 18 # normalize on to a max of 18 m/s (~35 kt)
-                vy = (np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  ) / 18 # normalize on to a max of 18 m/s (~35 kt)
-                # ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
+                vx = (np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  # normalize on to a max of 18 m/s (~35 kt)
+                vy = (np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  # normalize on to a max of 18 m/s (~35 kt)
+                ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
                 
                 # maybe for determining the relative position of other ac
                 # own_lat = bs.traf.lat[ac_idx]
@@ -1193,51 +1201,48 @@ class SectorEnv(MultiAgentEnv):
                 # --- 2. Build Candidate List (in index order, no sorting) ---
                 candidates = []
                 # Get current agent ID to index mapping
-                agent_id_to_idx = {agent_id: idx for idx, agent_id in enumerate(self.agents)}
+                # agent_id_to_idx = {agent_id: idx for idx, agent_id in enumerate(self.agents)}
                 
-                for other_agent_id in self.agents:
-                    if other_agent_id == agent:
+                for i in range(self.num_ac):
+                    if i == ac_idx:
                         continue
                     
                     # Skip if we can't find the waypoint
-                    if other_agent_id not in self.agent_waypoints:
-                        continue
+                    # if other_agent_id not in self.agent_waypoints:
+                    #     continue
                     
                     # Get the BlueSky index for this agent
-                    i = agent_id_to_idx[other_agent_id]
-                    
-                    # Calculate absolute positions
-                    dxi_abs = (bs.traf.lon[i] - x_origin) / MAX_LAT_LON
-                    dyi_abs = (bs.traf.lat[i] - y_origin) / MAX_LAT_LON
-                    
-                    # Calculate absolute velocities
+                    # i = agent_id_to_idx[other_agent_id]
+                    other_agent_id = self.agents[i] if i < len(self.agents) else None
                     int_hdg = bs.traf.hdg[i]
-                    vxi_abs = (np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]) / 18
-                    vyi_abs = (np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]) / 18
+                    int_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[i], bs.traf.lon[i]])) * NM2KM * 1000
+                    dx = float(int_loc[0] - ac_loc[0]) / 8500.0
+                    dy = float(int_loc[1] - ac_loc[1]) / 8000.0
                     
-                    # Make positions and velocities RELATIVE to ownship
-                    dx_rel = dxi_abs - dx  # intruder x - ownship x
-                    dy_rel = dyi_abs - dy  # intruder y - ownship y
-                    vx_rel = vxi_abs - vx  # intruder vx - ownship vx
-                    vy_rel = vyi_abs - vy  # intruder vy - ownship vy
+                    vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
+                    vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]
+                    dvx = float(vxi - vx) / 36.0
+                    dvy = float(vyi - vy) / 36.0
                     
+                    d_now = float(np.hypot(dx, dy)) / 8800.0
+                    risk = SectorEnv._cpa_risk(dx, dy, dvx, dvy)
                     # Calculate distance between ownship and intruder (in nautical miles)
-                    _, distance_nm = bs.tools.geo.kwikqdrdist(
-                        bs.traf.lat[ac_idx], bs.traf.lon[ac_idx],
-                        bs.traf.lat[i], bs.traf.lon[i]
-                    )
+                    # _, distance_nm = bs.tools.geo.kwikqdrdist(
+                    #     bs.traf.lat[ac_idx], bs.traf.lon[ac_idx],
+                    #     bs.traf.lat[i], bs.traf.lon[i]
+                    # )
                     # Normalize distance (typical max ~1 NM in this scenario)
-                    distance_normalized = float(distance_nm)
+                    # distance_normalized = float(distance_nm)
                     
-                    # Store (distance, dx_rel, dy_rel, vx_rel, vy_rel, agent_id)
-                    candidates.append((distance_normalized, dx_rel, dy_rel, vx_rel, vy_rel, other_agent_id))
+                    # Store (d_now, dx, dy, dvx, dvy, risk, agent_id) - risk for sorting only
+                    candidates.append((d_now, dx, dy, dvx, dvy, risk, other_agent_id))
 
-                # Sort by distance (closest first) and take top NUM_AC_STATE neighbors
-                candidates.sort(key=lambda x: x[0])
+                # Sort by risk (highest first) and take top NUM_AC_STATE neighbors
+                candidates.sort(key=lambda x: x[5], reverse=True) # sort on highest risk
                 top = candidates[:NUM_AC_STATE]
                     
-                # Store neighbor mapping for attention visualization (neighbor IDs sorted by distance)
-                self.neighbor_mapping[agent] = [c[5] for c in top if c[5] is not None]
+                # Store neighbor mapping for attention visualization (neighbor IDs sorted by risk)
+                self.neighbor_mapping[agent] = [c[6] for c in top if c[6] is not None]
 
                 # --- 3. Construct Vector ---
                 # We iterate through neighbors and append ALL features for that neighbor sequentially.
@@ -1250,10 +1255,17 @@ class SectorEnv(MultiAgentEnv):
                         # Extract features from tuple
                         t = top[i]
                         # Indices: 0=distance, 1=dx_rel, 2=dy_rel, 3=vx_rel, 4=vy_rel, 5=id
-                        distance, dx_rel, dy_rel, vx_rel, vy_rel = t[0], t[1], t[2], t[3], t[4]
+                        d_now, dx, dy, dvx, dvy = t[0], t[1], t[2], t[3], t[4]
+                        
+                        # Update max values for normalization analysis
+                        self.max_d_now = max(self.max_d_now, abs(d_now))
+                        self.max_dx = max(self.max_dx, abs(dx))
+                        self.max_dy = max(self.max_dy, abs(dy))
+                        self.max_dvx = max(self.max_dvx, abs(dvx))
+                        self.max_dvy = max(self.max_dvy, abs(dvy))
                         
                         # Append 5 features for this intruder
-                        intruder_features.extend([distance, dx_rel, dy_rel, vx_rel, vy_rel])
+                        intruder_features.extend([d_now, dx, dy, dvx, dvy])
                     else:
                         # Padding (5 zeros per missing agent)
                         intruder_features.extend([0.0] * 5)

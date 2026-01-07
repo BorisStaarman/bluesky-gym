@@ -174,9 +174,6 @@ class SectorEnv(MultiAgentEnv):
             safe_distance=PROTECTED_ZONE_M,# TODO is dit in meter? zou raar zijn toch, moet in NM
             lookahead_time=CPA_TIME_HORIZON_S
         )
-        
-        # Track maximum risk value (before capping)
-        self.max_risk_uncapped = 0.0
 
     @staticmethod
     def compute_relative_position(center, lat, lon):
@@ -633,7 +630,7 @@ class SectorEnv(MultiAgentEnv):
             except Exception:
                 pass
 
-        # Draw aircraft, color by risk, and display agent ID and risk value
+        # Draw aircraft, color by risk, and display risk value
         font = pygame.font.SysFont(None, 18)
         for agent in self.agents:
             try:
@@ -655,17 +652,10 @@ class SectorEnv(MultiAgentEnv):
                 pygame.draw.line(canvas, (0, 0, 0), pos, (pos[0] + heading_end_x, pos[1] - heading_end_y), width=4)
                 # Draw aircraft circle
                 pygame.draw.circle(canvas, color, (int(pos[0]), int(pos[1])), int(INTRUSION_DISTANCE * NM2KM * px_per_km / 2), width=2)
-                # Draw agent ID above aircraft
-                id_text = agent
-                id_surf = font.render(id_text, True, (255, 255, 255))  # White text
-                # Add black background for better visibility
-                text_rect = id_surf.get_rect(center=(pos[0], pos[1] - 20))
-                pygame.draw.rect(canvas, (0, 0, 0), text_rect.inflate(4, 2))
-                canvas.blit(id_surf, text_rect)
-                # Draw risk value below aircraft
+                # Draw risk value as text
                 risk_text = f"{risk_val:.2f}"
                 text_surf = font.render(risk_text, True, (0, 0, 0))
-                canvas.blit(text_surf, (pos[0] + 8, pos[1] + 8))
+                canvas.blit(text_surf, (pos[0] + 8, pos[1] - 8))
             except Exception:
                 continue
 
@@ -689,217 +679,23 @@ class SectorEnv(MultiAgentEnv):
             self.window = None
             
     
-    # def _cpa_risk(self, dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
-    #         k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2):
-    #     EPS = 1e-6  # to avoid div by zero
-        
-    #     # ORIGINAL parameters 
-    #     # _cpa_risk(dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
-    #     #     k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2
-        
-    #     # k controls the distance/sigmoid term (how  much closeness contributes to final risk)
-    #     #   - LOWER k = steeper sigmoid = risk drops off faster with distance = focus on closer agents
-    #     # w_d controls the distance factor (how much distance contributes to final risk)
-    #     # w_t controls the time factor (how much time contributes to final risk), soon vs later
-    #     # w_c controls the closing speed factor (how much closing speed contributes to final risk)
-    #     # distance_factor controls how much to penalize distant threats
-    #     #   - HIGHER distance_factor = more penalty on distant agents = focus on closer agents
-    #     diverge_penalty = 0.1  # was 0.1, reduced to further penalize diverging aircraft
-    #     hit_scale = 0.7  # was 0.7, reduced to prevent saturation
-    #     w_d = 0.8  # was 1.2, reduced to prevent saturation (theoretical max now ~1.6)
-    #     w_t = 0.1
-    #     w_c = 0.1
-    #     k = 0.15  # was 0.2, DECREASED to make sigmoid steeper -> focus on closer agents
-    #     distance_factor = 0.15  # was 0.15, INCREASED to penalize distant threats more -> focus on closer agents 
-
-    #     # Step 0: Early exit for distant aircraft (>400m) - no risk calculation needed
-    #     r2 = dx * dx + dy * dy  # relative distance squared
-    #     current_distance = float(np.sqrt(r2))  # current separation in meters
-    #     if current_distance > 600.0:  # Ignore aircraft more than 400m away
-    #         # print when this happens
-    #         # print("----------------------------------------")
-    #         # print(f"[RISK] Skipping risk calc for distant aircraft at {current_distance:.1f} m")
-    #         return 0.0
-        
-    #     # Step 1: Compute relative position and velocity
-    #     rv = dx * dvx + dy * dvy  # relative position dot relative velocity
-    #     v2 = dvx * dvx + dvy * dvy  # relative speed squared
-        
-    #     # If diverging (rv >= 0) and far away (>300m), no risk
-    #     if rv >= EPS and 600.0 >= current_distance:
-    #         return 0.0  # moving apart and far enough, no risk
-        
-    #     if rv < EPS and current_distance < 300.0:
-    #         return 1.01  # imminent collision course, max risk
-    #     # r = np.sqrt(r2)  # relative distance
-    #     # print r 
-    #     # print(r)
-
-    #     # Step 2: Handle case with no relative motion (v2 < EPS)
-    #     if v2 < EPS:
-    #         t_cpa = 0.0  # no CPA
-    #         d_cpa = float(np.hypot(dx, dy))  # Euclidean distance
-    #         approaching = False  # not moving toward each other
-    #         speed_mag = 0.0  # no relative speed
-    #     else:
-    #         speed_mag = float(np.sqrt(v2))  # speed magnitude
-    #         t_cpa = -rv / v2  # time to CPA
-    #         t_cpa = float(np.clip(t_cpa, 0.0, T))  # clip to [0, T]
-    #         d_cpa = float(np.hypot(dx + dvx * t_cpa, dy + dvy * t_cpa))  # distance at CPA
-    #         approaching = (rv < 0.0)  # moving toward each other
-
-    #     # Step 3: Calculate the time urgency factor (0 at horizon, 1 now)
-    #     time_factor = 1.0 - (t_cpa / (T + EPS))
-
-    #     # Step 4: Distance factor using a sigmoid function centered at R (protected zone)
-    #     soft = max(EPS, k * R)  # avoid div-by-zero
-    #     dist_factor = 1.0 / (1.0 + np.exp((d_cpa - R) / soft))  # smooth sigmoid decay for distance
-
-    #     # Step 5: Closing speed factor (normalized), only counts if approaching
-    #     if r2 < EPS or v2 < EPS:
-    #         closing_norm = 0.0
-    #     else:
-    #         closing_speed = max(0.0, -rv / (np.sqrt(r2) + EPS))  # m/s toward each other
-    #         closing_norm = closing_speed / (speed_mag + EPS)  # normalize to ~0..1
-
-    #     # Step 6: True collision check (optional, solve the quadratic for potential collision)
-    #     hit_bonus = 0.0
-    #     if v2 >= EPS:
-    #         a = v2
-    #         b = 2.0 * rv
-    #         c = r2 - R * R
-    #         disc = b * b - 4 * a * c
-    #         if disc >= 0.0:
-    #             s = float(np.sqrt(disc))
-    #             t1 = (-b - s) / (2 * a)
-    #             t2 = (-b + s) / (2 * a)
-    #             # first future intersection within horizon (if any)
-    #             candidates = [t for t in (t1, t2) if 0.0 <= t <= T]
-    #             if candidates:
-    #                 t_hit = min(candidates)
-    #                 # bonus scales with how soon the hit occurs
-    #                 hit_bonus = hit_scale * (1.0 - t_hit / (T + EPS))  # 0..0.2
-
-    #     # Step 7: Distance penalty - closer agents get a higher penalty
-    #     current_distance = float(np.sqrt(r2))  # current separation distance
-    #     distance_penalty = min(1.0, current_distance / (2 * R))  # 0 at contact, 1 at 4*R+
-
-    #     # Step 8: Combine the factors (weighted sum)
-    #     risk = (w_d * float(dist_factor)
-    #             + w_t * float(time_factor)
-    #             + w_c * float(closing_norm)
-    #             + float(hit_bonus))
-
-    #     # Step 9: Apply the distance penalty - closer threats have higher priority
-    #     risk *= (1.0 - distance_factor * distance_penalty)  # reduce risk for distant threats
-        
-    #     # Step 10: Penalize if agents are diverging (moving away from each other)
-    #     if not approaching:
-    #         risk *= diverge_penalty  # down-weight if moving apart
-
-    #     # Step 10.5: Track and print maximum uncapped risk value
-    #     uncapped_risk = float(max(0.0, risk))
-    #     if uncapped_risk > self.max_risk_uncapped:
-    #         self.max_risk_uncapped = uncapped_risk
-    #         print(f"[RISK] New maximum uncapped risk: {self.max_risk_uncapped:.6f}")
-
-    #     # Step 11: Clamp risk to [0, 1]
-    #     final_risk = float(max(0.0, min(1.0, risk)))
-    #     return final_risk  # Return the clamped risk value between 0 and 1
-    # def _cpa_risk(self, dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S):
-    #     """
-    #     Calculates risk based on Time to Closest Approach (tau) + specific collision bonus.
-        
-    #     Args:
-    #         R: Radius of the protected zone (e.g., 5-10 meters). NOT the lookahead distance.
-    #         T: Time horizon to look ahead (seconds).
-    #     """
-    #     # Constants
-    #     LOOKAHEAD_DIST = 600.0  # Max distance to even consider a target
-    #     HIT_SCALE = 0.5         # How much extra risk to add for a confirmed collision course
-    #     EPS = 1e-6
-
-    #     # 1. Kinematics Setup
-    #     r2 = dx * dx + dy * dy
-    #     current_dist = np.sqrt(r2)
-    #     v2 = dvx * dvx + dvy * dvy
-    #     rv = dx * dvx + dy * dvy
-
-    #     # 2. Early Exits
-    #     # If too far away, ignore completely
-    #     if current_dist > LOOKAHEAD_DIST:
-    #         return 0.0
-        
-    #     # If moving apart (rv >= 0), risk is low unless extremely close
-    #     if rv >= 0:
-    #         return 0.1 if current_dist < 500.0 else 0.0
-
-    #     # ---------------------------------------------------------
-    #     # PART A: BASE RISK (Tau-based / TCAS-style)
-    #     # ---------------------------------------------------------
-    #     # Calculate Time to Closest Approach (tau)
-    #     # Formula: tau = -(r . v) / (v . v)
-    #     if v2 < EPS:
-    #         tau = float('inf')
-    #     else:
-    #         tau = -rv / (v2 + EPS)
-        
-    #     # Base risk calculation
-    #     if tau < 0 or tau > T:
-    #         base_risk = 0.0
-    #     else:
-    #         # Linear decay: 1.0 if tau=0 (now), 0.0 if tau=T (horizon)
-    #         base_risk = (T - tau) / T
-        
-    #     # Scale by proximity (closer = scarier)
-    #     proximity_scale = 1.0 if current_dist < 500.0 else 500.0 / (current_dist + EPS)
-    #     risk = base_risk * proximity_scale
-
-    #     # ---------------------------------------------------------
-    #     # PART B: HIT BONUS (Quadratic Collision Check)
-    #     # ---------------------------------------------------------
-    #     # Solves |P + V*t| = R for t. Finds exact time we enter the protected zone R.
-    #     hit_bonus = 0.0
-        
-    #     if v2 >= EPS:
-    #         a = v2
-    #         b = 2.0 * rv
-    #         c = r2 - ((1.25*R) * (1.25*R)) # Uses the small protected zone radius R
-            
-    #         disc = b * b - 4 * a * c
-            
-    #         # If discriminant >= 0, a collision path exists
-    #         if disc >= 0.0:
-    #             s = np.sqrt(disc)
-    #             t1 = (-b - s) / (2 * a)
-    #             t2 = (-b + s) / (2 * a)
-                
-    #             # Check if either intersection happens within our time horizon [0, T]
-    #             candidates = [t for t in (t1, t2) if 0.0 <= t <= T]
-                
-    #             if candidates:
-    #                 t_hit = min(candidates)
-    #                 # Add bonus: 0.5 extra risk if hit is immediate, 0.0 if hit is at T
-    #                 hit_bonus = HIT_SCALE * (1.0 - t_hit / (T + EPS))
-
-    #     # ---------------------------------------------------------
-    #     # PART C: COMBINE
-    #     # ---------------------------------------------------------
-    #     total_risk = risk + hit_bonus
-        
-    #     uncapped_risk = float(max(0.0, total_risk))
-    #     if uncapped_risk > self.max_risk_uncapped:
-    #         self.max_risk_uncapped = uncapped_risk
-    #         print(f"[RISK] New maximum uncapped risk: {self.max_risk_uncapped:.6f}")
-        
-    #     return float(np.clip(total_risk, 0.0, 1.0))
-    def _cpa_risk(self, dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
+    @staticmethod
+    def _cpa_risk(dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
             k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2):
         EPS = 1e-6  # to avoid div by zero
         
+        # ORIGINAL parameters 
+        # _cpa_risk(dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
+        #     k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2
+        
+        # k controls the distance/sigmoid term (how  much closeness contributes to final risk)
+        # w_d controls the distance factor (how much distance contributes to final risk)
+        # w_t controls the time factor (how much time contributes to final risk), soon vs later
+        # w_c controls the closing speed factor (how much closing speed contributes to final risk)
+        # hit_bonus is an additional bonus if a true collision is predicted within the horizon
         diverge_penalty = 0.1
-        hit_scale = 0.6  # was 0.4
-        w_d = 0.6 # was 1.2 
+        hit_scale = 0.7  # was 0.4
+        w_d = 1.2 # was 1.2
         k = 0.2 # was 0.2
         distance_factor = 0.15 # was 0.3, higher means more influence of distance penalty
 
@@ -940,7 +736,7 @@ class SectorEnv(MultiAgentEnv):
         if v2 >= EPS:
             a = v2
             b = 2.0 * rv
-            c = r2 - (R*1.25)**2 # make R bit bigger to be more save
+            c = r2 - R * R
             disc = b * b - 4 * a * c
             if disc >= 0.0:
                 s = float(np.sqrt(disc))
@@ -973,7 +769,7 @@ class SectorEnv(MultiAgentEnv):
         # Step 11: Clamp risk to [0, 1]
         return float(max(0.0, min(1.0, risk)))  # Return the normalized risk value between 0 and 1
 
-
+            
 
     def _get_observation(self, active_agents):
         dim = 3 + 8 * NUM_AC_STATE
@@ -1004,12 +800,9 @@ class SectorEnv(MultiAgentEnv):
                 cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
                 airspeed_kts = bs.traf.tas[ac_idx] * MpS2Kt
                 
-                # Convert aviation heading (0°=North) to velocity components
-                # vx = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  # East component
-                # vy = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  # North component
-                vy = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  # East component
-                vx = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  # North component
-                
+                vx = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
+                vy = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
+
                 ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
 
                 # Build candidate list with CPA risk, and keep track of agent ids
@@ -1023,40 +816,13 @@ class SectorEnv(MultiAgentEnv):
                     dx = float(int_loc[0] - ac_loc[0])
                     dy = float(int_loc[1] - ac_loc[1])
                     
-                    # flipped for the cpa risk
-                    # Convert aviation heading (0°=North) to velocity components
-                    # vxi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]  # East component
-                    vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]  # East component
-
-                    # vyi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]  # North component
                     vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
-                    
+                    vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]
                     dvx = float(vxi - vx)
                     dvy = float(vyi - vy)
-                    
-                    # Calculate dot product to determine approaching/diverging
-                    # rv = dx * dvx + dy * dvy  # dot product
-                    
-                    # # Debug output for KL001 with detailed breakdown
-                    # if agent == "KL001" and other_agent_id is not None:
-                    #     # d_now = float(np.hypot(dx, dy))
-                        
-                    #     # # Show detailed breakdown
-                    #     print(f"\n[DEBUG] KL001 vs {other_agent_id}:")
-                    #     # print(f"  Position: dx={dx:.1f}m, dy={dy:.1f}m, dist={d_now:.1f}m")
-                    #     # print(f"  KL001 vel: vx={vx:.2f}, vy={vy:.2f} m/s (hdg={ac_hdg:.1f}°)")
-                    #     # print(f"  {other_agent_id} vel: vxi={vxi:.2f}, vyi={vyi:.2f} m/s (hdg={int_hdg:.1f}°)")
-                    #     # print(f"  Relative vel: dvx={dvx:.2f}, dvy={dvy:.2f} m/s")
-                    #     # print(f"  Dot product rv = ({dx:.1f} * {dvx:.2f}) + ({dy:.1f} * {dvy:.2f}) = {rv:.1f}")
-                        
-                    #     if rv < 0:
-                    #         print(f"  → {other_agent_id} is APPROACHING KL001 (rv={rv:.1f} < 0)")
-                    #     else:
-                    #         print(f"  → {other_agent_id} is DIVERGING from KL001 (rv={rv:.1f} > 0)")
-                    
                     trk = np.arctan2(dvy, dvx)
                     d_now = float(np.hypot(dx, dy))
-                    risk = self._cpa_risk(dx, dy, dvx, dvy)
+                    risk = SectorEnv._cpa_risk(dx, dy, dvx, dvy)
                     candidates.append((risk, dx, dy, dvx, dvy, np.cos(trk), np.sin(trk), d_now, other_agent_id))
 
                 # Sort by descending risk; break ties by current distance (closer first)

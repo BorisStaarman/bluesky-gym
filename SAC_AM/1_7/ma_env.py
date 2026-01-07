@@ -34,14 +34,14 @@ ACTION_FREQUENCY = 1 # how many sim steps per action
 NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
 MAX_STEPS = 400 # max steps per episode
 
-# reward function parameters
+# =========================== REWARD PENALTIES PARAMETERS ===========================
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
-INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
-WAYPOINT_REACHED_REWARD = 2.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 2.0  # Scale factor for distance-to-waypoint progress
+INTRUSION_PENALTY = -20.0  # was -15.0 Separation violation - penalty applied every timestep during intrusion
+WAYPOINT_REACHED_REWARD = 5.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 3.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
-BOUNDARY_VIOLATION_PENALTY = -2.0  # Penalty for leaving polygon boundary (not at waypoint)
-STEP_PENALTY = -0.012  # Small penalty applied every step to encourage efficiency
+BOUNDARY_VIOLATION_PENALTY = -4.0  # Penalty for leaving polygon boundary (not at waypoint)
+STEP_PENALTY = -0.0012  # Small penalty applied every step to encourage efficiency
 
 # Proximity penalty parameters
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance (150m when intrusion is 100m)
@@ -71,7 +71,7 @@ AIRSPEED_CENTER_KTS = 35.0
 AIRSPEED_SCALE_KTS = 10.0 * 3.4221
 
 # collision risk parameters
-PROTECTED_ZONE_M = 100  # meters
+PROTECTED_ZONE_M = 105  # meters
 CPA_TIME_HORIZON_S = 15 # seconds
 
 # logging
@@ -278,8 +278,8 @@ class SectorEnv(MultiAgentEnv):
         # Note: _pairs_penalized_this_step is cleared at the start of each step
         # This allows the same pair to be penalized again in the next timestep
         
-        # Check for collisions (disabled - agents no longer removed on collision)
-        # self._check_collisions(agents_in_step)
+        # Check for collisions
+        self._check_collisions(agents_in_step)
         
         terminateds = self._get_terminateds(agents_in_step)
         truncateds = self._get_truncateds(agents_in_step)
@@ -914,8 +914,8 @@ class SectorEnv(MultiAgentEnv):
                 })
     
     def _get_terminateds(self, active_agents):
-        # Terminate agents that reached their waypoint (collision termination disabled)
-        return {agent: (agent in self.waypoint_reached_agents) 
+        # Terminate agents that reached their waypoint OR collided with another aircraft
+        return {agent: (agent in self.waypoint_reached_agents or agent in self.collided_agents) 
                 for agent in active_agents}
     
     def _get_truncateds(self, active_agents):

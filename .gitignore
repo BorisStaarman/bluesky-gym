@@ -20,6 +20,25 @@ metrics_*/
 
 # dont push all sac metrics
 SAC/**/metrics/
+SAC/**/models/
+SAC/**/__pycache__/
+
 SAC_AM/**/metrics/
+SAC_AM/**/models/
+SAC_AM/**/__pycache__/
+
 PPO/**/metrics/
+PPO/**/models/
+PPO/**/__pycache__/
+
 PPO_AM/**/metrics/
+PPO_AM/**/models/
+PPO_AM/**/__pycache__/
+
+Two_stage/**/metrics/
+Two_stage/**/models/
+Two_stage/**/__pycache__/
+
+Two_stage_AM/**/metrics/
+Two_stage_AM/**/models/
+Two_stage_AM/**/__pycache__/

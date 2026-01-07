@@ -26,8 +26,8 @@ NM2KM = 1.852
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with
 
-NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
-RENDER = False # Set to True to watch the agent play
+NUM_EVAL_EPISODES = 20  # How many episodes to run for evaluation
+RENDER = True # Set to True to watch the agent play
 
 # NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
 # RENDER = True # Set to True to watch the agent play
@@ -35,10 +35,6 @@ RENDER = False # Set to True to watch the agent play
 # This path MUST match the checkpoint directory from your main.py tr    aining script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 METRICS_DIR = os.path.join(script_dir, "metrics")
-
-# --- CHOOSE WHICH CHECKPOINT TO EVALUATE ---
-# Set to True to use stage1_best_weights, False to use stage1_weights (last iteration)
-USE_BEST_STAGE1_WEIGHTS = True
 
 # --- CHOOSE WHICH CHECKPOINT TO EVALUATE ---
 # Set to True to use stage1_best_weights, False to use stage1_weights (last iteration)

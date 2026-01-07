@@ -52,7 +52,7 @@ AIRSPEED_CENTER_KTS = 35.0
 AIRSPEED_SCALE_KTS = 10.0 * 3.4221
 
 # collision risk parameters
-PROTECTED_ZONE_M = 105  # meters
+PROTECTED_ZONE_M = 100  # meters
 CPA_TIME_HORIZON_S = 15 # seconds
 
 # Reward parameters
@@ -73,12 +73,12 @@ LOG_EVERY_N = 100  # throttle repeated warnings
 METRICS_BASE_DIR = "metrics"  # Fallback (not used when passed via env_config)
 
 class SectorEnv(MultiAgentEnv):
-    metadata = {"name": "ma_env", "render_modes": ["rgb_array", "human"], "render_fps": 1}
+    metadata = {"name": "ma_env", "render_modes": ["rgb_array", "human"], "render_fps": 10}
 
     def __init__(self, render_mode=None, n_agents=30, run_id="default",
                  debug_obs=False, debug_obs_episodes=2, debug_obs_interval=1, debug_obs_agents=None,
                  collect_obs_stats=False, print_obs_stats_per_episode=False,
-                 intrusion_penalty=None, metrics_base_dir=None, center=None):
+                 intrusion_penalty=None, metrics_base_dir=None, center=None, debug_cpa_inputs=False):
         super().__init__()
         
         self.render_mode = render_mode
@@ -90,6 +90,7 @@ class SectorEnv(MultiAgentEnv):
         self.debug_obs_agents = debug_obs_agents
         self.collect_obs_stats = collect_obs_stats
         self._print_obs_stats_per_episode = print_obs_stats_per_episode
+        self.debug_cpa_inputs = debug_cpa_inputs
         
         # Observation statistics tracking
         self._obs_stats_enabled = collect_obs_stats
@@ -258,6 +259,11 @@ class SectorEnv(MultiAgentEnv):
         self._update_obs_stats(observations)
         self._env_step += 1
         self._maybe_print_observations(observations, when="step")
+        
+        # Debug: Print dx/dy relative to KL001 for visual inspection
+        # if getattr(self, 'debug_cpa_inputs', False) and 'KL001' in agents_in_step:
+        #     self._print_cpa_debug_relative_to_kl001(agents_in_step)
+        
         rewards, infos = self._get_reward(agents_in_step)
         
         # Teacher action
@@ -462,6 +468,114 @@ class SectorEnv(MultiAgentEnv):
             return np.array([0.0, 0.0], dtype=np.float32)
     
         
+    def _print_cpa_debug_relative_to_kl001(self, agents_in_step):
+        """Print all CPA risk calculation variables for all agents relative to KL001."""
+        if 'KL001' not in agents_in_step:
+            return
+        
+        try:
+            kl001_idx = bs.traf.id2idx('KL001')
+            kl001_lat = bs.traf.lat[kl001_idx]
+            kl001_lon = bs.traf.lon[kl001_idx]
+            kl001_loc = fn.latlong_to_nm(self.center, np.array([kl001_lat, kl001_lon])) * NM2KM * 1000
+            
+            print(f"\n{'='*100}")
+            print(f"[CPA_RISK_DEBUG] Episode={self._episode_index} Step={self._env_step}")
+            print(f"  Reference: KL001 at ({kl001_loc[0]:.2f}, {kl001_loc[1]:.2f}) m")
+            print(f"{'='*100}")
+            
+            for agent in agents_in_step:
+                if agent == 'KL001':
+                    continue
+                    
+                try:
+                    ac_idx = bs.traf.id2idx(agent)
+                    ac_lat = bs.traf.lat[ac_idx]
+                    ac_lon = bs.traf.lon[ac_idx]
+                    ac_loc = fn.latlong_to_nm(self.center, np.array([ac_lat, ac_lon])) * NM2KM * 1000
+                    
+                    # Get velocities
+                    kl001_hdg = bs.traf.hdg[kl001_idx]
+                    kl001_gs = bs.traf.gs[kl001_idx]
+                    kl001_vx = np.cos(np.deg2rad(kl001_hdg)) * kl001_gs
+                    kl001_vy = np.sin(np.deg2rad(kl001_hdg)) * kl001_gs
+                    
+                    ac_hdg = bs.traf.hdg[ac_idx]
+                    ac_gs = bs.traf.gs[ac_idx]
+                    ac_vx = np.cos(np.deg2rad(ac_hdg)) * ac_gs
+                    ac_vy = np.sin(np.deg2rad(ac_hdg)) * ac_gs
+                    
+                    # Calculate inputs to CPA risk
+                    dx = float(ac_loc[0] - kl001_loc[0])
+                    dy = float(ac_loc[1] - kl001_loc[1])
+                    dvx = float(ac_vx - kl001_vx)
+                    dvy = float(ac_vy - kl001_vy)
+                    
+                    # Replicate NEW CPA risk calculation to show all intermediate values
+                    EPS = 1e-6
+                    R = PROTECTED_ZONE_M
+                    T = CPA_TIME_HORIZON_S
+                    
+                    rv = dx * dvx + dy * dvy
+                    v2 = dvx * dvx + dvy * dvy
+                    r2 = dx * dx + dy * dy
+                    current_distance = float(np.sqrt(r2))
+                    
+                    # Check early exits
+                    if v2 < EPS or rv >= -EPS:
+                        status = "DIVERGING/STATIC"
+                        risk = 0.0
+                        t_cpa = 0.0
+                        d_cpa = current_distance
+                    else:
+                        speed_mag = float(np.sqrt(v2))
+                        t_cpa = -rv / v2
+                        
+                        if t_cpa < 0.0 or t_cpa > T:
+                            status = "CPA_OUT_OF_HORIZON"
+                            risk = 0.0
+                            d_cpa = current_distance
+                        else:
+                            d_cpa = float(np.hypot(dx + dvx * t_cpa, dy + dvy * t_cpa))
+                            
+                            if d_cpa > 5.0 * R:
+                                status = "CPA_SAFE (>500m)"
+                                risk = 0.0
+                            else:
+                                status = "THREAT"
+                                # Calculate risk components
+                                time_urgency = 1.0 - (t_cpa / T)
+                                distance_threat = 1.0 / (1.0 + np.exp((d_cpa - R) / (0.4 * R)))
+                                closing_speed = -rv / (current_distance + EPS)
+                                closing_factor = float(np.clip(closing_speed / 20.0, 0.0, 1.0))
+                                proximity_factor = 1.0 - float(np.clip((current_distance - R) / (4.0 * R), 0.0, 1.0))
+                                
+                                risk = (0.50 * distance_threat + 
+                                       0.25 * time_urgency + 
+                                       0.15 * proximity_factor +
+                                       0.10 * closing_factor)
+                                risk = float(np.clip(risk, 0.0, 1.0))
+                    
+                    if status == "THREAT":
+                        print(f"\n  Agent: {agent} [{status}]")
+                        print(f"    Inputs:      dx={dx:8.2f}m  dy={dy:8.2f}m  dvx={dvx:6.2f}m/s  dvy={dvy:6.2f}m/s")
+                        print(f"    Basics:      curr_dist={current_distance:7.2f}m  rel_speed={speed_mag:6.2f}m/s")
+                        print(f"    CPA:         t_cpa={t_cpa:6.2f}s  d_cpa={d_cpa:7.2f}m")
+                        print(f"    Factors:     distance_threat={distance_threat:.4f}  time_urgency={time_urgency:.4f}")
+                        print(f"                 proximity={proximity_factor:.4f}  closing={closing_factor:.4f}")
+                        print(f"    >>> RISK={risk:.4f} <<<")
+                    else:
+                        # Compact format for non-threats
+                        print(f"  {agent:7s} [{status:20s}] dist={current_distance:6.1f}m  risk={risk:.4f}")
+                    
+                except Exception as e:
+                    print(f"  {agent}: <error: {e}>")
+            
+            print(f"{'='*100}\n")
+                    
+        except Exception as e:
+            print(f"[CPA_RISK_DEBUG] Error: {e}")
+    
     def _maybe_print_observations(self, observations, when="step"):
         """Optionally print full observation vectors for inspection.
         Controls:
@@ -608,21 +722,55 @@ class SectorEnv(MultiAgentEnv):
             except Exception:
                 continue
 
-        # Draw lines to the top 3 most risky neighbors for agent 'KL001'
-        # Use pre-computed most_risky data instead of recalculating
+        # Draw lines to the top 4 most risky neighbors for agent 'KL001'
+        # Calculate risk FROM KL001's perspective to all other agents
         agent1 = 'KL001'
-        if agent1 in most_risky and agent1 in agent_positions:
-            # Get the top 3 risky neighbors from the sorted risk_levels
+        if agent1 in self.agents and agent1 in agent_positions:
             try:
-                # Sort all other agents by risk level
-                other_agents = [(agent, risk_levels.get(agent, 0.0)) 
-                               for agent in self.agents if agent != agent1]
-                other_agents.sort(key=lambda x: -x[1])
-                top3 = [(agent, risk) for agent, risk in other_agents[:4] 
-                        if agent in agent_positions]
+                # Get KL001's index and state
+                kl001_idx = bs.traf.id2idx(agent1)
+                kl001_lat = bs.traf.lat[kl001_idx]
+                kl001_lon = bs.traf.lon[kl001_idx]
+                kl001_loc = fn.latlong_to_nm(self.center, np.array([kl001_lat, kl001_lon])) * NM2KM * 1000
+                kl001_hdg = bs.traf.hdg[kl001_idx]
+                kl001_gs = bs.traf.gs[kl001_idx]
+                kl001_vx = np.cos(np.deg2rad(kl001_hdg)) * kl001_gs
+                kl001_vy = np.sin(np.deg2rad(kl001_hdg)) * kl001_gs
                 
-                line_colors = [(255,0,0), (255,140,0), (255,255,0)]  # red, orange, yellow
-                for idx, (neighbor_id, _) in enumerate(top3):
+                # Calculate risk from KL001 to each other agent
+                kl001_risks = []
+                for other_agent in self.agents:
+                    if other_agent == agent1:
+                        continue
+                    try:
+                        other_idx = bs.traf.id2idx(other_agent)
+                        other_lat = bs.traf.lat[other_idx]
+                        other_lon = bs.traf.lon[other_idx]
+                        other_loc = fn.latlong_to_nm(self.center, np.array([other_lat, other_lon])) * NM2KM * 1000
+                        
+                        dx = float(other_loc[0] - kl001_loc[0])
+                        dy = float(other_loc[1] - kl001_loc[1])
+                        
+                        other_hdg = bs.traf.hdg[other_idx]
+                        other_gs = bs.traf.gs[other_idx]
+                        other_vx = np.cos(np.deg2rad(other_hdg)) * other_gs
+                        other_vy = np.sin(np.deg2rad(other_hdg)) * other_gs
+                        
+                        dvx = float(other_vx - kl001_vx)
+                        dvy = float(other_vy - kl001_vy)
+                        
+                        risk = SectorEnv._cpa_risk(dx, dy, dvx, dvy)
+                        kl001_risks.append((other_agent, risk))
+                    except Exception:
+                        continue
+                
+                # Sort by risk (highest first) and take top 4
+                kl001_risks.sort(key=lambda x: -x[1])
+                top4 = [(agent, risk) for agent, risk in kl001_risks[:4] 
+                        if agent in agent_positions and risk > 0]
+                
+                line_colors = [(255,0,0), (255,140,0), (255,255,0), (180,180,180)]  # red, orange, yellow, gray
+                for idx, (neighbor_id, _) in enumerate(top4):
                     start = agent_positions[agent1]
                     end = agent_positions[neighbor_id]
                     color = line_colors[idx] if idx < len(line_colors) else (128,128,128)
@@ -630,7 +778,47 @@ class SectorEnv(MultiAgentEnv):
             except Exception:
                 pass
 
-        # Draw aircraft, color by risk, and display risk value
+        # Draw aircraft, color by risk TO KL001, and display risk value
+        # First calculate all risks TO KL001
+        risks_to_kl001 = {}
+        if 'KL001' in self.agents:
+            try:
+                kl001_idx = bs.traf.id2idx('KL001')
+                kl001_lat = bs.traf.lat[kl001_idx]
+                kl001_lon = bs.traf.lon[kl001_idx]
+                kl001_loc = fn.latlong_to_nm(self.center, np.array([kl001_lat, kl001_lon])) * NM2KM * 1000
+                kl001_hdg = bs.traf.hdg[kl001_idx]
+                kl001_gs = bs.traf.gs[kl001_idx]
+                kl001_vx = np.cos(np.deg2rad(kl001_hdg)) * kl001_gs
+                kl001_vy = np.sin(np.deg2rad(kl001_hdg)) * kl001_gs
+                
+                for agent in self.agents:
+                    if agent == 'KL001':
+                        risks_to_kl001[agent] = 0.0
+                        continue
+                    try:
+                        ac_idx = bs.traf.id2idx(agent)
+                        ac_lat = bs.traf.lat[ac_idx]
+                        ac_lon = bs.traf.lon[ac_idx]
+                        ac_loc = fn.latlong_to_nm(self.center, np.array([ac_lat, ac_lon])) * NM2KM * 1000
+                        
+                        dx = float(ac_loc[0] - kl001_loc[0])
+                        dy = float(ac_loc[1] - kl001_loc[1])
+                        
+                        ac_hdg = bs.traf.hdg[ac_idx]
+                        ac_gs = bs.traf.gs[ac_idx]
+                        ac_vx = np.cos(np.deg2rad(ac_hdg)) * ac_gs
+                        ac_vy = np.sin(np.deg2rad(ac_hdg)) * ac_gs
+                        
+                        dvx = float(ac_vx - kl001_vx)
+                        dvy = float(ac_vy - kl001_vy)
+                        
+                        risks_to_kl001[agent] = SectorEnv._cpa_risk(dx, dy, dvx, dvy)
+                    except Exception:
+                        risks_to_kl001[agent] = 0.0
+            except Exception:
+                pass
+        
         font = pygame.font.SysFont(None, 18)
         for agent in self.agents:
             try:
@@ -639,8 +827,9 @@ class SectorEnv(MultiAgentEnv):
                 pos = agent_positions.get(agent, None)
                 if pos is None:
                     continue
-                risk_val = risk_levels.get(agent, 0.0)
-                # Color: green for KL001, others red scaled by risk
+                # Get risk TO KL001 (not agent's own risk)
+                risk_val = risks_to_kl001.get(agent, 0.0)
+                # Color: green for KL001, others red scaled by risk TO KL001
                 if agent == "KL001":
                     color = (0, 255, 0)
                 else:
@@ -652,8 +841,9 @@ class SectorEnv(MultiAgentEnv):
                 pygame.draw.line(canvas, (0, 0, 0), pos, (pos[0] + heading_end_x, pos[1] - heading_end_y), width=4)
                 # Draw aircraft circle
                 pygame.draw.circle(canvas, color, (int(pos[0]), int(pos[1])), int(INTRUSION_DISTANCE * NM2KM * px_per_km / 2), width=2)
-                # Draw risk value as text
-                risk_text = f"{risk_val:.2f}"
+                # Draw agent ID and risk value TO KL001 as text
+                agent_id_short = agent[-3:]  # Show last 3 chars (e.g., "001")
+                risk_text = f"{agent_id_short} {risk_val:.2f}"
                 text_surf = font.render(risk_text, True, (0, 0, 0))
                 canvas.blit(text_surf, (pos[0] + 8, pos[1] - 8))
             except Exception:
@@ -682,92 +872,75 @@ class SectorEnv(MultiAgentEnv):
     @staticmethod
     def _cpa_risk(dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
             k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2):
-        EPS = 1e-6  # to avoid div by zero
+        """
+        Calculate collision risk based on Closest Point of Approach (CPA).
         
-        # ORIGINAL parameters 
-        # _cpa_risk(dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
-        #     k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2
+        Returns a risk value between 0.0 (no threat) and 1.0 (imminent collision).
+        Only considers APPROACHING aircraft within the time horizon.
+        """
+        EPS = 1e-6
         
-        # k controls the distance/sigmoid term (how  much closeness contributes to final risk)
-        # w_d controls the distance factor (how much distance contributes to final risk)
-        # w_t controls the time factor (how much time contributes to final risk), soon vs later
-        # w_c controls the closing speed factor (how much closing speed contributes to final risk)
-        # hit_bonus is an additional bonus if a true collision is predicted within the horizon
-        diverge_penalty = 0.1
-        hit_scale = 0.7  # was 0.4
-        w_d = 1.2 # was 1.2
-        k = 0.2 # was 0.2
-        distance_factor = 0.15 # was 0.3, higher means more influence of distance penalty
-
-        # Step 1: Compute relative position and velocity
-        rv = dx * dvx + dy * dvy  # relative position dot relative velocity
+        # time horizon parameter
+        T = 20.0  # put to 20 seconds
+        min_length = 750.0 #put to 750.meters
+        
+        # Step 1: Basic calculations
+        rv = dx * dvx + dy * dvy  # dot product: <0 if approaching, >0 if diverging
         v2 = dvx * dvx + dvy * dvy  # relative speed squared
-        r2 = dx * dx + dy * dy  # relative distance squared
-
-        # Step 2: Handle case with no relative motion (v2 < EPS)
-        if v2 < EPS:
-            t_cpa = 0.0  # no CPA
-            d_cpa = float(np.hypot(dx, dy))  # Euclidean distance
-            approaching = False  # not moving toward each other
-            speed_mag = 0.0  # no relative speed
-        else:
-            speed_mag = float(np.sqrt(v2))  # speed magnitude
-            t_cpa = -rv / v2  # time to CPA
-            t_cpa = float(np.clip(t_cpa, 0.0, T))  # clip to [0, T]
-            d_cpa = float(np.hypot(dx + dvx * t_cpa, dy + dvy * t_cpa))  # distance at CPA
-            approaching = (rv < 0.0)  # moving toward each other
-
-        # Step 3: Calculate the time urgency factor (0 at horizon, 1 now)
-        time_factor = 1.0 - (t_cpa / (T + EPS))
-
-        # Step 4: Distance factor using a sigmoid function centered at R (protected zone)
-        soft = max(EPS, k * R)  # avoid div-by-zero
-        dist_factor = 1.0 / (1.0 + np.exp((d_cpa - R) / soft))  # smooth sigmoid decay for distance
-
-        # Step 5: Closing speed factor (normalized), only counts if approaching
-        if r2 < EPS or v2 < EPS:
-            closing_norm = 0.0
-        else:
-            closing_speed = max(0.0, -rv / (np.sqrt(r2) + EPS))  # m/s toward each other
-            closing_norm = closing_speed / (speed_mag + EPS)  # normalize to ~0..1
-
-        # Step 6: True collision check (optional, solve the quadratic for potential collision)
-        hit_bonus = 0.0
-        if v2 >= EPS:
-            a = v2
-            b = 2.0 * rv
-            c = r2 - R * R
-            disc = b * b - 4 * a * c
-            if disc >= 0.0:
-                s = float(np.sqrt(disc))
-                t1 = (-b - s) / (2 * a)
-                t2 = (-b + s) / (2 * a)
-                # first future intersection within horizon (if any)
-                candidates = [t for t in (t1, t2) if 0.0 <= t <= T]
-                if candidates:
-                    t_hit = min(candidates)
-                    # bonus scales with how soon the hit occurs
-                    hit_bonus = hit_scale * (1.0 - t_hit / (T + EPS))  # 0..0.2
-
-        # Step 7: Distance penalty - closer agents get a higher penalty
-        current_distance = float(np.sqrt(r2))  # current separation distance
-        distance_penalty = min(1.0, current_distance / (2 * R))  # 0 at contact, 1 at 4*R+
-
-        # Step 8: Combine the factors (weighted sum)
-        risk = (w_d * float(dist_factor)
-                + w_t * float(time_factor)
-                + w_c * float(closing_norm)
-                + float(hit_bonus))
-
-        # Step 9: Apply the distance penalty - closer threats have higher priority
-        risk *= (1.0 - distance_factor * distance_penalty)  # reduce risk for distant threats
-
-        # Step 10: Penalize if agents are diverging (moving away from each other)
-        if not approaching:
-            risk *= diverge_penalty  # down-weight if moving apart
-
-        # Step 11: Clamp risk to [0, 1]
-        return float(max(0.0, min(1.0, risk)))  # Return the normalized risk value between 0 and 1
+        r2 = dx * dx + dy * dy  # current distance squared
+        current_distance = float(np.sqrt(r2))
+        
+        # Step 2: Early exit if not moving or diverging (moving apart/parallel)
+        # This is the most important filter - only care about approaching aircraft
+        if v2 < EPS or rv >= -EPS:  # rv >= 0 means diverging
+            return 0.0
+        
+        # Step 3: Calculate time to CPA (only valid for approaching aircraft)
+        speed_mag = float(np.sqrt(v2))
+        t_cpa = -rv / v2  # Will be positive since rv < 0
+        
+        # Step 4: Early exit if CPA is beyond time horizon or in the past
+        if t_cpa < 0.0 or t_cpa > T:
+            return 0.0
+        
+        # Step 5: Calculate distance at CPA
+        d_cpa = float(np.hypot(dx + dvx * t_cpa, dy + dvy * t_cpa))
+        
+        # Step 6: Early exit if CPA distance is very safe (beyond 5x protected zone)
+        if d_cpa > min_length:  # > 500m at closest point - no threat
+            return 0.0
+        
+        # Step 7: Calculate risk components for potential threats
+        
+        # Time urgency: 1.0 when CPA is now, 0.0 when CPA is at horizon
+        # More urgent when CPA happens sooner
+        time_urgency = 1.0 - (t_cpa / T)
+        
+        # Distance threat: How close will they get?
+        # 1.0 when d_cpa = 0 (collision), decays smoothly toward 0 at 5*R
+        # Using sigmoid centered at R with width 0.4*R for smooth transition
+        distance_threat = 1.0 / (1.0 + np.exp((d_cpa - R) / (0.4 * R)))
+        
+        # Closing speed factor: How fast are they converging?
+        # Normalized to typical speeds (20 m/s ~= 40 knots)
+        closing_speed = -rv / (current_distance + EPS)  # m/s toward each other
+        closing_factor = float(np.clip(closing_speed / 30.0, 0.0, 1.0))
+        
+        # Current distance factor: Prioritize threats that are already close
+        # Scale from 1.0 (at protected zone) to 0.0 (at 5*R)
+        proximity_factor = 1.0 - float(np.clip((current_distance - R) / (4.0 * R), 0.0, 1.0))
+        
+        # Step 8: Combine factors with weights
+        # Distance threat is most important (50%)
+        # Time urgency is second (25%) 
+        # Current proximity is third (15%)
+        # Closing speed is fourth (10%)
+        risk = (0.50 * distance_threat + 
+                0.25 * time_urgency + 
+                0.15 * proximity_factor +
+                0.10 * closing_factor)
+        
+        return float(np.clip(risk, 0.0, 1.0))
 
             
 
@@ -815,6 +988,12 @@ class SectorEnv(MultiAgentEnv):
                     int_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[i], bs.traf.lon[i]])) * NM2KM * 1000
                     dx = float(int_loc[0] - ac_loc[0])
                     dy = float(int_loc[1] - ac_loc[1])
+                    # Debug: print relative position components for verification
+                    if getattr(self, 'debug_obs', False):
+                        try:
+                            print(f"[CPA_DEBUG] agent={agent} other={other_agent_id} dx={dx:.6f} dy={dy:.6f}")
+                        except Exception:
+                            pass
                     
                     vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
                     vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]

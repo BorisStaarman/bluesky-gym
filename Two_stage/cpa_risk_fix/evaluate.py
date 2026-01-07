@@ -24,21 +24,17 @@ MpS2Kt = 1.94384
 NM2KM = 1.852
 
 # --- Parameters for Evaluation ---
-N_AGENTS = 5  # The number of agents the model was trained with
+N_AGENTS = 20  # The number of agents the model was trained with
 
-NUM_EVAL_EPISODES = 5  # How many episodes to run for evaluation
+NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
 RENDER = True # Set to True to watch the agent play
 
 # NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
 # RENDER = True # Set to True to watch the agent play
 
-# This path MUST match the checkpoint directory from your main.py training script
+# This path MUST match the checkpoint directory from your main.py tr    aining script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 METRICS_DIR = os.path.join(script_dir, "metrics")
-
-# --- CHOOSE WHICH CHECKPOINT TO EVALUATE ---
-# Set to True to use stage1_best_weights, False to use stage1_weights (last iteration)
-USE_BEST_STAGE1_WEIGHTS = True
 
 # --- CHOOSE WHICH CHECKPOINT TO EVALUATE ---
 # Set to True to use stage1_best_weights, False to use stage1_weights (last iteration)
@@ -80,7 +76,8 @@ if __name__ == "__main__":
         render_mode="human" if RENDER else None, 
         n_agents=N_AGENTS,
         run_id=RUN_ID,
-        metrics_base_dir=METRICS_DIR
+        metrics_base_dir=METRICS_DIR,
+        debug_cpa_inputs=True  # Enable dx/dy debugging relative to KL001
     )
 
     # --- Lists to store metrics from the evaluation run ---
