@@ -83,16 +83,28 @@ nu ook werken met additive attention mechanism, met 3 attention heads.
 PROTECTED_ZONE_M = 105  ipv 100 meter.
 
 12_11:
-<<<<<<< Updated upstream
-=======
 12_9 werkte nog steeds niet goed. nu de observation vector toch wel relatief maken van elkaar!
 nu de sorting op de distance eruit halen. 
 eerst proberen trainen op wat minder agents. 
 kleinere obersvation vector voor intruder, van 7 naar 5. 
 
+12_17:
+de multiplicatie factor van 1 van de matrixen in de AM op *3 gezet. kijken of dit helpt
+dit werkt!! intrusions kan die goed mee omgaan. alleen gaat niet naar waypoint
 
+12_18
+waypoint reach reward vam 3 naar 5.
+out of bound penatly van -3 naar -4. 
+ook de END_ALPHA = 0.02 # was 0.05  
 
-
+1_6 
+op nlr server
+step_penalty naar -0.0018
+waypoint reach reward naar -7.0
+dit werkt echt heel slecht. beste reward was -1.98
+terug naar vorige parameters. en misschien niet de drones verwijderen als ze botsen maar gewoon in de simulatie laten. 
+------------------------------------PPO_AM----------------------------------------
+moet helemaal nog gebeuren, maar kan je ook laten schieten
 
 
 --------------------------------------Two_Stage -----------------------------------------
@@ -107,3 +119,36 @@ nadat ik de cpa risk parameters heb aangepast gaat, de performance nog veel bete
 12_16_2
 nu trainen we hetzelfde stage 1 ding op de nieuwe cpa_risk parameters. ook zetten we de inrusion distance op 105 meter met het trainen. dit zou de performance
 tijdens evaluatie nog wel stukkie beter moeten laten worden. 
+hier de cpa _risk parameters lekker tunen
+
+12_17:
+nieuwe run doen om de NN te trainen gebruik makende van de getunede parameters van 12_16_2
+
+
+--------------------------------------Two_Stage_AM -----------------------------------------
+12_16_2
+kleine training run 50 iterations eerst gedaan. drones gaan wel naar waypoint toe maar ontwijken 
+elkaar niet. 
+
+12_30_nlr
+verder gaan met de vorige, maar op nlr server en 300 iterations. 
+
+--------------------------------------Two_Stage_PPO -----------------------------------------
+1_5
+dit is een start om alles werkend te krijgen
+
+1_6
+bij de vorige run gingen ze meteen naar de waypoints. bij deze run implementeren we de werkende reward functie 
+van sac algorithme, hopelijk werkt dat wel. 
+reward functie gehaald bij sac 12_2
+we blijven de waypoint reach reward net zo lang omhoog doen totdat die eindelijk een keer bedenkt om naar de waypoints toe te gaan. 
+waypoint reach reward nu naar 7 gezet, bij 5 deed ie het nog niet.+
+waypoint naar 7 maakte de results heel slecht. 
+
+1_7 
+terug naar waypoint reward 5. en een wat langere training run doen. op nlr laptop
+BOUNDARY_VIOLATION_PENALTY = -3.0  was -2
+
+--------------------------------------Two_Stage_SAC -----------------------------------------
+dit werkt niet hetzelfde als PPO
+idee is om de buffer te vullen met 30% mvp data voordat de training begint. 

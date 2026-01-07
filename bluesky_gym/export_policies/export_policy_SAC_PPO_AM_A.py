@@ -94,7 +94,7 @@ import os
 if ray.is_initialized():
     ray.shutdown()
 
-sac_am_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM\12_9"
+sac_am_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM\12_17"
 if sac_am_dir not in sys.path:
     sys.path.insert(0, sac_am_dir)
 
@@ -118,11 +118,31 @@ runtime_env = {
 # UPDATE THESE PATHS when you have a trained checkpoint:
 # - Replace checkpoint path with your best model from SAC_AM/12_9
 # - Update the output filename (e.g., SAC_AM_9.pt or SAC_AM_3HEAD.pt)
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM\12_9\models\sectorcr_ma_sac\best_iter_00011",  # UPDATE THIS
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_AM_9.pt",  # Updated output name
+#     env_creator=sector_env_creator,
+#     runtime_env=runtime_env
+# )
+
+
+# export on 12_18 of model 12_17. likely the first good working SAC_AM model. works wel except for reaching waypoints. 
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM\12_17\models\sectorcr_ma_sac\best_iter_11602",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_AM_10.pt",
+#     env_creator=sector_env_creator,
+#     runtime_env=runtime_env
+# )
+
 export_policy_torch_old_api(
-    r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM\12_9\models\sectorcr_ma_sac\best_iter_00011",  # UPDATE THIS
+    r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM\12_18\models\sectorcr_ma_sac\best_iter_17922",
     "shared_policy",
-    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_AM_9.pt",  # Updated output name
+    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_AM_11.pt",
     env_creator=sector_env_creator,
     runtime_env=runtime_env
 )
+
+
 

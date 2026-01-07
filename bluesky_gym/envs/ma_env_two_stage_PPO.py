@@ -52,18 +52,21 @@ AIRSPEED_CENTER_KTS = 35.0
 AIRSPEED_SCALE_KTS = 10.0 * 3.4221
 
 # collision risk parameters
-PROTECTED_ZONE_M = 105  # meters
+PROTECTED_ZONE_M = 100  # meters
 CPA_TIME_HORIZON_S = 15 # seconds
 
 # Reward parameters
-DRIFT_PENALTY = -0.5  # Penalty for drift from waypoint direction
-STEP_PENALTY = -0.005  # Small penalty per timestep to encourage efficiency
-WAYPOINT_RADIUS = 0.01  # NM - radius to consider waypoint reached
-WAYPOINT_REACHED_REWARD = 10.0  # Large reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 5.0  # Scale factor for progress reward
-SOFT_INTRUSION_FACTOR = 2.0  # Proximity warning zone = this * INTRUSION_DISTANCE
-INTRUSION_PENALTY = -10.0  # Penalty for intrusion (per timestep)
-PROXIMITY_MAX_PENALTY = 0.5  # Max penalty for proximity warning
+DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
+STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
+WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
+WAYPOINT_REACHED_REWARD = 6.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 2.0  # Scale factor for distance-to-waypoint progress
+PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
+BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
+SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
+INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
+PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary
+COLLISION_DISTANCE = 1 / 1852 * 100  # 100 meters - collision threshold (terminates both aircraft)
 
 # logging
 LOG_EVERY_N = 100  # throttle repeated warnings
@@ -78,7 +81,7 @@ class SectorEnv(MultiAgentEnv):
     def __init__(self, render_mode=None, n_agents=30, run_id="default",
                  debug_obs=False, debug_obs_episodes=2, debug_obs_interval=1, debug_obs_agents=None,
                  collect_obs_stats=False, print_obs_stats_per_episode=False,
-                 intrusion_penalty=None, metrics_base_dir=None, center=None):
+                 intrusion_penalty=None, proximity_max_penalty=None, metrics_base_dir=None, center=None):
         super().__init__()
         
         self.render_mode = render_mode
@@ -104,7 +107,8 @@ class SectorEnv(MultiAgentEnv):
         
         # Use provided intrusion penalty or default from module constant
         self.intrusion_penalty = intrusion_penalty if intrusion_penalty is not None else INTRUSION_PENALTY
-        self.proximity_max_penalty = PROXIMITY_MAX_PENALTY
+        # Use provided proximity penalty or default from module constant
+        self.proximity_max_penalty = proximity_max_penalty if proximity_max_penalty is not None else PROXIMITY_MAX_PENALTY
         
         self.num_ac = n_agents
         # Use provided center or default - this is the reference point for relative coordinates
@@ -200,12 +204,16 @@ class SectorEnv(MultiAgentEnv):
         self._env_step = 0
         # for savin  data in csv file
         self._agent_steps = {a: 0 for a in self.agents}
-        self._rewards_acc = {a: {"drift": 0.0, "progress": 0.0, "intrusion": 0.0, "proximity": 0.0} for a in self.agents}
+        self._rewards_acc = {a: {"drift": 0.0, "progress": 0.0, "intrusion": 0.0, "path_efficiency": 0.0, "boundary": 0.0, "step": 0.0, "proximity": 0.0} for a in self.agents}
         self._rewards_counts = {a: 0 for a in self.agents}
         self._intrusions_acc = {a: 0 for a in self.agents}  # Track intrusions per agent per episode
         # Track which drone pairs have already received intrusion penalty this episode
         self._penalized_pairs = set()  # Store tuples of (agent1, agent2) where agent1 < agent2
         self._pairs_penalized_this_step = set()  # Temporary buffer for pairs penalized in current step
+        # Track collisions
+        self.collided_agents = set()  # Agents that have collided and should be terminated
+        # Reset start positions for path efficiency tracking
+        self._agent_start_positions = {}
         # for evaluation
         self.total_intrusions = 0
         
@@ -278,6 +286,9 @@ class SectorEnv(MultiAgentEnv):
         # Note: _pairs_penalized_this_step is cleared at the start of each step
         # This allows the same pair to be penalized again in the next timestep
         
+        # Check for collisions
+        self._check_collisions(agents_in_step)
+        
         terminateds = self._get_terminateds(agents_in_step)
         truncateds = self._get_truncateds(agents_in_step)
         
@@ -287,13 +298,17 @@ class SectorEnv(MultiAgentEnv):
             m_drift    = self._rewards_acc.get(a, {}).get("drift", 0.0)    / n
             m_progress = self._rewards_acc.get(a, {}).get("progress", 0.0) / n
             m_intr     = self._rewards_acc.get(a, {}).get("intrusion", 0.0)/ n
-            m_prox     = self._rewards_acc.get(a, {}).get("proximity", 0.0)/ n
+            m_path_eff = self._rewards_acc.get(a, {}).get("path_efficiency", 0.0)/ n
+            m_boundary = self._rewards_acc.get(a, {}).get("boundary", 0.0)/ n
+            m_step     = self._rewards_acc.get(a, {}).get("step", 0.0)/ n
+            m_proximity = self._rewards_acc.get(a, {}).get("proximity", 0.0)/ n
 
             # increment per-agent episode index
             self._agent_episode_index[a] += 1
             
             # Determine termination reason
             waypoint_reached = a in self.waypoint_reached_agents
+            collided = a in self.collided_agents
             truncated = truncateds.get(a, False)
 
             # buffer one row for THIS agent only
@@ -303,13 +318,20 @@ class SectorEnv(MultiAgentEnv):
                 "mean_reward_drift":    m_drift,
                 "mean_reward_progress": m_progress,
                 "mean_reward_intrusion":m_intr,
-                "mean_reward_proximity":m_prox,
+                "mean_reward_path_efficiency": m_path_eff,
+                "mean_reward_boundary": m_boundary,
+                "mean_reward_step": m_step,
+                "mean_reward_proximity": m_proximity,
                 "sum_reward_drift":     self._rewards_acc.get(a, {}).get("drift", 0.0),
                 "sum_reward_progress":  self._rewards_acc.get(a, {}).get("progress", 0.0),
                 "sum_reward_intrusion": self._rewards_acc.get(a, {}).get("intrusion", 0.0),
+                "sum_reward_path_efficiency": self._rewards_acc.get(a, {}).get("path_efficiency", 0.0),
+                "sum_reward_boundary": self._rewards_acc.get(a, {}).get("boundary", 0.0),
+                "sum_reward_step": self._rewards_acc.get(a, {}).get("step", 0.0),
                 "sum_reward_proximity": self._rewards_acc.get(a, {}).get("proximity", 0.0),
                 "total_intrusions":     self._intrusions_acc.get(a, 0),
                 "terminated_waypoint": waypoint_reached,  # True if agent reached waypoint
+                "terminated_collision": collided,  # True if agent collided with another aircraft
                 "truncated": truncated,  # True if episode truncated (out of bounds or time limit)
                 "finished_at": time.time(),  
             })
@@ -505,13 +527,20 @@ class SectorEnv(MultiAgentEnv):
                     "mean_reward_drift",
                     "mean_reward_progress",
                     "mean_reward_intrusion",
+                    "mean_reward_path_efficiency",
+                    "mean_reward_boundary",
+                    "mean_reward_step",
                     "mean_reward_proximity",
                     "sum_reward_drift",
                     "sum_reward_progress",
                     "sum_reward_intrusion",
+                    "sum_reward_path_efficiency",
+                    "sum_reward_boundary",
+                    "sum_reward_step",
                     "sum_reward_proximity",
                     "total_intrusions",
                     "terminated_waypoint",   # True if agent reached waypoint
+                    "terminated_collision",  # True if agent collided with another aircraft
                     "truncated",             # True if truncated (out of bounds/time limit)
                     "finished_at",
                 ],
@@ -547,22 +576,33 @@ class SectorEnv(MultiAgentEnv):
                 
                 drift_reward = self._check_drift(agent, ac_idx)
                 intrusion_reward, agent_intrusion = self._check_intrusion(agent, ac_idx)
-                proximity_reward = self._check_proximity(agent, ac_idx)
                 progress_reward = self._check_progress(agent, ac_idx)
+                path_efficiency_reward = self._check_path_efficiency(agent, ac_idx)
+                boundary_penalty = self._check_boundary_violation(agent, ac_idx)
+                proximity_penalty = self._check_proximity(agent, ac_idx)
+                step_penalty = STEP_PENALTY  # Applied every step
                 
-                rewards[agent] = drift_reward + intrusion_reward + proximity_reward + progress_reward  + STEP_PENALTY
+                rewards[agent] = (drift_reward + intrusion_reward + 
+                                progress_reward + path_efficiency_reward + 
+                                boundary_penalty + proximity_penalty + step_penalty) / 1000.0
                 
                 # accumulate for per-episode stats
                 self._rewards_acc[agent]["drift"]     += float(drift_reward)
                 self._rewards_acc[agent]["progress"]  += float(progress_reward)
                 self._rewards_acc[agent]["intrusion"] += float(intrusion_reward)
-                self._rewards_acc[agent]["proximity"] += float(proximity_reward)
+                self._rewards_acc[agent]["path_efficiency"] += float(path_efficiency_reward)
+                self._rewards_acc[agent]["boundary"] += float(boundary_penalty)
+                self._rewards_acc[agent]["proximity"] += float(proximity_penalty)
+                self._rewards_acc[agent]["step"] += float(step_penalty)
                 self._rewards_counts[agent]          += 1
                 
                 infos[agent]["reward_drift"] = drift_reward
                 infos[agent]["reward_intrusion"] = intrusion_reward
-                infos[agent]["reward_proximity"] = proximity_reward
                 infos[agent]["reward_progress"] = progress_reward
+                infos[agent]["reward_path_efficiency"] = path_efficiency_reward
+                infos[agent]["reward_boundary"] = boundary_penalty
+                infos[agent]["reward_proximity"] = proximity_penalty
+                infos[agent]["reward_step"] = step_penalty
                 infos[agent]["intrusion"] = agent_intrusion
                 
             except Exception as e:
@@ -1190,42 +1230,49 @@ class SectorEnv(MultiAgentEnv):
         return drift * DRIFT_PENALTY
     
     def _check_proximity(self, agent_id, ac_idx):
-        """Gentle shaping penalty when within a soft band above intrusion distance.
-
-        - If distance >= soft_thresh: 0 penalty
-        - If INTRUSION_DISTANCE <= distance < soft_thresh: linear penalty from
-          0 down to -self.proximity_max_penalty as aircraft get closer to the hard boundary
-        - If distance < INTRUSION_DISTANCE: do not add proximity shaping here
-          (the hard intrusion penalty covers this case to avoid double-penalizing)
+        """Calculate proximity penalty for getting close to other aircraft.
+        
+        This creates a "force field" effect that gently pushes agents away from each other
+        before they reach the hard intrusion boundary.
+        
+        Penalty applies in a "soft band" between INTRUSION_DISTANCE and SOFT_INTRUSION_FACTOR * INTRUSION_DISTANCE.
+        The penalty increases quadratically (squared) as agents get closer, creating smooth gradients.
+        
+        Args:
+            agent_id: The agent identifier
+            ac_idx: The aircraft index in BlueSky's traffic arrays
+            
+        Returns:
+            float: Proximity penalty (0.0 or negative value)
         """
         soft_thresh = SOFT_INTRUSION_FACTOR * INTRUSION_DISTANCE
+        
         # Compute min distance to any other aircraft
         min_dist = np.inf
         for i in range(self.num_ac):
             if i == ac_idx:
                 continue
+            
             _, d = bs.tools.geo.kwikqdrdist(
                 bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], bs.traf.lat[i], bs.traf.lon[i]
             )
-            if d < min_dist:
-                min_dist = d
+            min_dist = min(min_dist, d)  # Slightly faster built-in min
 
         # Outside soft band: no shaping
         if min_dist >= soft_thresh:
             return 0.0
 
-        # Inside hard intrusion: handled by _check_intrusion, so skip shaping here
-        if min_dist < INTRUSION_DISTANCE:
-            return 0.0
-
-        # Linearly scale penalty within [INTRUSION_DISTANCE, soft_thresh)
-        # Penalty increases as aircraft get CLOSER to intrusion boundary
-        # - At soft_thresh (0.108 NM): penalty = 0 (no penalty, safe distance)
-        # - At INTRUSION_DISTANCE (0.054 NM): penalty = -PROXIMITY_MAX_PENALTY (maximum warning)
-        band = soft_thresh - INTRUSION_DISTANCE  # Width of the warning zone (0.054 NM)
-        ratio = (soft_thresh - min_dist) / band if band > 0 else 0.0  # 0 when far, 1 when close
+        # Calculate Ratio (0.0 = Far, 1.0 = Touching Hard Boundary)
+        band = soft_thresh - INTRUSION_DISTANCE
+        ratio = (soft_thresh - min_dist) / band if band > 0 else 0.0
+        
+        # Clamp at 1.0, but DON'T return 0 if inside intrusion.
+        # We want the "pain" of the soft penalty to persist on top of the hard penalty.
         ratio = np.clip(ratio, 0.0, 1.0)
-        return -self.proximity_max_penalty * float(ratio)
+
+        # Use Square (Exponential) for the "Force Field" effect.
+        # 0.5 distance -> 0.25 pain. 0.9 distance -> 0.81 pain.
+        return PROXIMITY_MAX_PENALTY * float(ratio ** 2)
     
     def _check_intrusion(self, agent_id, ac_idx):
         """Return intrusion penalty for this agent on this step, and intrusion flag.
@@ -1281,3 +1328,126 @@ class SectorEnv(MultiAgentEnv):
                         self._intrusions_acc[agent_id] += 1
 
         return step_penalty, had_intrusion
+    
+    def _check_path_efficiency(self, agent_id, ac_idx):
+        """Reward for staying close to the straight-line path to waypoint.
+        
+        This discourages large unnecessary detours while still allowing 
+        deviations needed for conflict avoidance.
+        
+        Measures the perpendicular distance from the aircraft to the 
+        straight line between start position and waypoint.
+        """
+        if not hasattr(self, '_agent_start_positions'):
+            self._agent_start_positions = {}
+        
+        # Store initial position on first call for this agent
+        if agent_id not in self._agent_start_positions:
+            ac_loc = fn.latlong_to_nm(self.center, 
+                np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]]))
+            self._agent_start_positions[agent_id] = ac_loc
+            return 0.0  # No penalty/reward on first step
+        
+        # Get current position
+        ac_loc = fn.latlong_to_nm(self.center, 
+            np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]]))
+        
+        # Get waypoint position
+        wpt_lat, wpt_lon = self.agent_waypoints[agent_id]
+        wpt_loc = fn.latlong_to_nm(self.center, np.array([wpt_lat, wpt_lon]))
+        
+        # Get start position
+        start_loc = self._agent_start_positions[agent_id]
+        
+        # Calculate perpendicular distance to straight-line path
+        # Using point-to-line distance formula
+        start_to_wpt = wpt_loc - start_loc
+        start_to_ac = ac_loc - start_loc
+        
+        path_length = np.linalg.norm(start_to_wpt)
+        
+        if path_length < 1e-6:  # Aircraft at waypoint
+            return 0.0
+        
+        # Project aircraft position onto the path vector
+        projection = np.dot(start_to_ac, start_to_wpt) / path_length
+        
+        # Calculate perpendicular distance (cross-track error)
+        cross_track_error = np.abs(np.cross(start_to_wpt, start_to_ac)) / path_length
+        
+        # Reward inversely proportional to cross-track error
+        # Small detours (< 0.1 NM) get small penalty
+        # Large detours (> 0.3 NM) get larger penalty
+        # Scale: -PATH_EFFICIENCY_SCALE at ~0.3 NM cross-track error
+        penalty = -cross_track_error * PATH_EFFICIENCY_SCALE
+        
+        return float(penalty)
+    
+    def _check_boundary_violation(self, agent_id, ac_idx):
+        """Check if agent has left the polygon boundary (when not at waypoint).
+        
+        Returns:
+            float: Penalty if outside boundary (not at waypoint), 0.0 otherwise
+        """
+        try:
+            # Check if agent has reached waypoint - no penalty if at waypoint
+            if agent_id in self.waypoint_reached_agents:
+                return 0.0
+            
+            # Check if agent is outside the polygon
+            outside = not bs.tools.areafilter.checkInside(
+                self.poly_name,
+                np.array([bs.traf.lat[ac_idx]]),
+                np.array([bs.traf.lon[ac_idx]]),
+                np.array([ALTITUDE * FT2M]),
+            )
+            
+            if outside:
+                return BOUNDARY_VIOLATION_PENALTY
+            else:
+                return 0.0
+                
+        except Exception as e:
+            # If we can't check boundary, assume it's okay
+            return 0.0
+    
+    def _check_collisions(self, active_agents):
+        """Check for collisions between aircraft and mark collided agents for termination.
+        
+        A collision occurs when two aircraft are closer than COLLISION_DISTANCE.
+        Both aircraft in a collision are marked for termination.
+        
+        Args:
+            active_agents: List of currently active agent IDs
+        """
+        agents_to_check = [agent for agent in active_agents if agent not in self.collided_agents]
+        
+        for i, agent_i in enumerate(agents_to_check):
+            if agent_i in self.collided_agents:
+                continue
+                
+            try:
+                ac_idx_i = bs.traf.id2idx(agent_i)
+            except (IndexError, KeyError):
+                continue
+            
+            for agent_j in agents_to_check[i+1:]:
+                if agent_j in self.collided_agents:
+                    continue
+                    
+                try:
+                    ac_idx_j = bs.traf.id2idx(agent_j)
+                except (IndexError, KeyError):
+                    continue
+                
+                # Calculate distance between aircraft
+                _, distance = bs.tools.geo.kwikqdrdist(
+                    bs.traf.lat[ac_idx_i], bs.traf.lon[ac_idx_i],
+                    bs.traf.lat[ac_idx_j], bs.traf.lon[ac_idx_j]
+                )
+                
+                # Check for collision
+                if distance < COLLISION_DISTANCE:
+                    self.collided_agents.add(agent_i)
+                    self.collided_agents.add(agent_j)
+                    # print(f"[COLLISION] Agents {agent_i} and {agent_j} collided at distance {distance*1852:.1f}m")

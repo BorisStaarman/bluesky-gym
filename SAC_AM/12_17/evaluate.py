@@ -37,11 +37,11 @@ NM2KM = 1.852
 
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with (MUST match training!)
-NUM_EVAL_EPISODES = 5 # How many episodes to run for evaluation
-RENDER = True # Set to True to watch the agent play (keep False for faster evaluation)
+NUM_EVAL_EPISODES = 100 # How many episodes to run for evaluation
+RENDER = False # Set to True to watch the agent play (keep False for faster evaluation)
 
 # --- Visualization Settings ---
-SHOW_ALPHA_VALUES = True  # Set to False to hide attention weight visualization (faster rendering)
+SHOW_ALPHA_VALUES = False  # Set to False to hide attention weight visualization (faster rendering)
 
 # This path MUST match the checkpoint directory from your main.py training script
 # (script_dir already defined above)
@@ -203,6 +203,10 @@ if __name__ == "__main__":
     episode_intrusions = []
     total_waypoints_reached = 0
     episode_witout_intrusion = 0
+    
+    # Track attention weight statistics across all episodes
+    all_attention_weights = []  # Store all attention weight vectors for later analysis
+    
     # velocity_agent_1 = []
     # `polygon`_areas_km2 = []  # Store polygon area in km² for each episode
 
@@ -294,6 +298,11 @@ if __name__ == "__main__":
                                 if neigh_idx < len(agent_attn_full):
                                     # Store with key as neighbor_id so render can display it
                                     env.attention_weights[neighbor_id] = agent_attn_full[neigh_idx]
+            
+                # Collect attention weights for statistics (regardless of rendering)
+                if attn_weights is not None:
+                    # Flatten and store all attention weights from this step
+                    all_attention_weights.append(attn_weights.flatten())
                     
                     # Find green agent's position in current observation batch for plotting
                     if green_agent in agent_ids:
@@ -443,6 +452,21 @@ if __name__ == "__main__":
     print(f"  - Episodes without Intrusion: {episode_witout_intrusion}")
     
     print('average density created', N_AGENTS / np.mean(env.areas_km2))
+    
+    # --- Attention Weight Statistics ---
+    if all_attention_weights:
+        # Concatenate all collected attention weights
+        all_attn = np.concatenate(all_attention_weights)
+        mean_alpha = np.mean(all_attn)
+        std_alpha = np.std(all_attn)
+        min_alpha = np.min(all_attn)
+        max_alpha = np.max(all_attn)
+        
+        print(f"\n📊 Attention Weight Statistics:")
+        print(f"  - Mean (α): {mean_alpha:.4f} ± {std_alpha:.4f}")
+        print(f"  - Min: {min_alpha:.4f}")
+        print(f"  - Max: {max_alpha:.4f}")
+        print(f"  - Total samples: {len(all_attn)}")
     
     # print(f"\n📐 Polygon Area Statistics:")
     # print(f"  - Average Area: {avg_polygon_area:.4f} km²")

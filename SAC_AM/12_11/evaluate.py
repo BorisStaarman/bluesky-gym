@@ -39,7 +39,7 @@ NUM_EVAL_EPISODES = 5 # How many episodes to run for evaluation
 RENDER = True # Set to True to watch the agent play (keep False for faster evaluation)
 
 # --- Visualization Settings ---
-SHOW_ALPHA_VALUES = True  # Set to False to hide attention weight visualization (faster rendering)
+SHOW_ALPHA_VALUES = False  # Set to False to hide attention weight visualization (faster rendering)
 
 # This path MUST match the checkpoint directory from your main.py training script
 # (script_dir already defined above)
