@@ -32,7 +32,7 @@ ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
 
 # --- Parameters ---
 N_AGENTS = 20  # Number of agents for training
-TOTAL_ITERS = 500   # Maximum total iterations
+TOTAL_ITERS = 18000   # Maximum total iterations
 EXTRA_ITERS = 50           # When resuming, run this many more iterations
 FORCE_RETRAIN = True       # Start fresh with new hyperparameters
 # Optional: Only useful if you want periodic checkpoints mid-training.

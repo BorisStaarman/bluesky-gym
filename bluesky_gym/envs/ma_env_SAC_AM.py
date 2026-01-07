@@ -453,7 +453,7 @@ class SectorEnv(MultiAgentEnv):
                 
                 rewards[agent] = (drift_reward + intrusion_reward + 
                                 progress_reward + path_efficiency_reward + 
-                                boundary_penalty + proximity_penalty + step_penalty) / 100.0
+                                boundary_penalty + proximity_penalty + step_penalty) / 1000.0
                 
                 # accumulate for per-episode stats
                 self._rewards_acc[agent]["drift"]     += float(drift_reward)
