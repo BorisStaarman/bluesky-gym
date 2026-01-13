@@ -52,17 +52,17 @@ AIRSPEED_CENTER_KTS = 35.0
 AIRSPEED_SCALE_KTS = 10.0 * 3.4221
 
 # collision risk parameters
-PROTECTED_ZONE_M = 105  # meters
+PROTECTED_ZONE_M = 100  # meters
 CPA_TIME_HORIZON_S = 15 # seconds
 
 # Reward parameters
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 7.0  # Reward for reaching waypoint
+WAYPOINT_REACHED_REWARD = 6.0  # Reward for reaching waypoint
 PROGRESS_REWARD_SCALE = 2.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
-BOUNDARY_VIOLATION_PENALTY = -2.0  # Penalty for leaving polygon boundary (not at waypoint)
+BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
 PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary
@@ -76,7 +76,7 @@ LOG_EVERY_N = 100  # throttle repeated warnings
 METRICS_BASE_DIR = "metrics"  # Fallback (not used when passed via env_config)
 
 class SectorEnv(MultiAgentEnv):
-    metadata = {"name": "ma_env", "render_modes": ["rgb_array", "human"], "render_fps": 1}
+    metadata = {"name": "ma_env", "render_modes": ["rgb_array", "human"], "render_fps": 10}
 
     def __init__(self, render_mode=None, n_agents=30, run_id="default",
                  debug_obs=False, debug_obs_episodes=2, debug_obs_interval=1, debug_obs_agents=None,

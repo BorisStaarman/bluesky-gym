@@ -25,6 +25,7 @@ from bluesky_gym.envs.ma_env_two_stage_AM import SectorEnv
 from ray.tune.registry import register_env
 
 import torch
+import torch
 import torch.nn.functional as F
 
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
@@ -100,6 +101,19 @@ if __name__ == "__main__":
     # module = algo.get_module("shared_policy")  # This is NEW API only
     policy = algo.get_policy("shared_policy")
     
+    # DEBUG: Check the model's final layer output dimension
+    model = policy.model
+    print(f"\n[DEBUG Model Architecture]")
+    print(f"  Model type: {type(model)}")
+    if hasattr(model, 'final_layer'):
+        print(f"  final_layer input dim: {model.final_layer.in_features}")
+        print(f"  final_layer output dim: {model.final_layer.out_features}")
+    if hasattr(model, 'action_dim'):
+        print(f"  model.action_dim: {model.action_dim}")
+    if hasattr(model, '_last_output_dim'):
+        print(f"  model._last_output_dim: {model._last_output_dim}")
+    print()
+    
     env = SectorEnv(
         render_mode="human" if RENDER else None, 
         n_agents=N_AGENTS,
@@ -137,12 +151,37 @@ if __name__ == "__main__":
             agent_ids = list(obs.keys())
             obs_array = np.stack(list(obs.values()))
             
-            # Compute deterministic actions (no exploration)
-            actions_np = policy.compute_actions(obs_array, explore=False)[0]
-            # print(actions_np)
+            # Get raw model output directly (bypassing policy's action distribution)
+            with torch.no_grad():
+                input_dict = {"obs": torch.from_numpy(obs_array).float()}
+                model_out, _ = policy.model(input_dict, [], None)
+                actions_np = model_out.numpy()  # Use model output directly
             
+            # Compare teacher vs model actions every 20 steps
+            # if episode_steps % 20 == 0 and episode_steps < 60:  # Only first 3 comparisons to reduce spam
+            #     print(f"\n[Episode {episode}, Step {episode_steps}] Teacher vs Model Actions:")
+            #     for i, agent_id in enumerate(agent_ids[:3]):  # Show first 3 agents
+            #         teacher_action = env._calculate_mvp_action(agent_id)
+            #         model_action = actions_np[i]
+                    
+            #         # Handle both 1D and 2D actions
+            #         if len(model_action.shape) == 0:
+            #             print(f"  {agent_id}: [ERROR] Scalar action")
+            #             continue
+            #         elif model_action.shape[0] == 1:
+            #             # Model only outputs 1 value - show it alongside teacher's 2 values
+            #             print(f"  {agent_id}:")
+            #             print(f"    Teacher: [{teacher_action[0]:+.3f}, {teacher_action[1]:+.3f}]")
+            #             print(f"    Model:   [{model_action[0]:+.3f}] (only 1D output - INCORRECT)")
+            #         elif model_action.shape[0] >= 2:
+            #             print(f"  {agent_id}:")
+            #             print(f"    Teacher: [{teacher_action[0]:+.3f}, {teacher_action[1]:+.3f}]")
+            #             print(f"    Model:   [{model_action[0]:+.3f}, {model_action[1]:+.3f}]")
+            #             # Calculate action difference
+            #             diff = np.abs(teacher_action - model_action[:2])
+            #             print(f"    Diff:    [{diff[0]:.3f}, {diff[1]:.3f}]")
             
-            # Map actions back to agent IDs
+            # Map actions back to agent IDs  
             actions = {agent_id: action for agent_id, action in zip(agent_ids, actions_np)}
 
             # Step the environment

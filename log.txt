@@ -103,6 +103,15 @@ step_penalty naar -0.0018
 waypoint reach reward naar -7.0
 dit werkt echt heel slecht. beste reward was -1.98
 terug naar vorige parameters. en misschien niet de drones verwijderen als ze botsen maar gewoon in de simulatie laten. 
+
+1_7
+drones worden niet meer verwijdert als ze botsen. 
+zelfde parameters voor reward functie als regular SAC (gepakt van SAC_new environment)
+
+1_12
+ownship feature bypassen zodat ze niet mee worden genomen in de attention mechanism head
+dit zou het niet meer naar waypoint probleem gaan moeten oplossen
+
 ------------------------------------PPO_AM----------------------------------------
 moet helemaal nog gebeuren, maar kan je ook laten schieten
 
@@ -133,6 +142,16 @@ elkaar niet.
 12_30_nlr
 verder gaan met de vorige, maar op nlr server en 300 iterations. 
 
+1_7
+dit werkt!
+je zou deze nog beter kunnen maken door gewoon meer te trainen. trainen was nog niet helemaal klaar namelijk. 
+
+
+1_12
+deze aanpassen: de intruder features gaan niet meer door de attention head. die worden er los langs gepasst
+zodat de attention head niet de mogelijkheid krijgt om ze te negeren. 
+first stage dus hier opnieuw trainen. 
+
 --------------------------------------Two_Stage_PPO -----------------------------------------
 1_5
 dit is een start om alles werkend te krijgen
@@ -143,12 +162,45 @@ van sac algorithme, hopelijk werkt dat wel.
 reward functie gehaald bij sac 12_2
 we blijven de waypoint reach reward net zo lang omhoog doen totdat die eindelijk een keer bedenkt om naar de waypoints toe te gaan. 
 waypoint reach reward nu naar 7 gezet, bij 5 deed ie het nog niet.+
-waypoint naar 7 maakte de results heel slecht. 
 
 1_7 
-terug naar waypoint reward 5. en een wat langere training run doen. op nlr laptop
+waypoint reach reward naar 6
 BOUNDARY_VIOLATION_PENALTY = -3.0  was -2
 
+1_9 
+meer iteraties dan 1_7 en iets langere warmup. 
+waypoint reach reward naar 5
+
+1_12_PPO
+optimize training:
+ - decaying learning rate vanaf de helft van de iteraties ofzo
+- slowly reduce entropy towards end of training
+
+--------------------------------------Two_Stage_AM_PPO -----------------------------------------
+1_8_PPO
+goeie start, agents ontwijken alle drones maar gaan niet naar waypoint. 
+
+1_9_PPO
+waypoint reach reward omhoog naar: 5
+ 
+1_12_PPO
+dense reward van naar goal toe gaan moet omhoog. een constante pull naar de waypoint toe. en misschein step 
+penalty omlaag want de drones loiterren. 
+PROGRESS_REWARD_SCALE = 4.0  # ipv 2
+ook een kleine negatieve progress reward toegevoegd als de drones niet dichterbij komen. 
+
+GROTE VERANDERING: de ownship features gaan niet door de attention head, maar worden los ervan doorgevoergd
+richting het policy NN. dit zorgt ervoor dat de attnetion head ze niet onbelangirjk kan vinden. 
+
+1_13_PPO
+er zat een bug in de observation vector. 
+die is nu gefixt en daarop trainen. als ie hierdoor nog steeds niet naar de waypoints toe gaat is het tijd voor de volgende upgrades:
+
+waypoint reach reward omhoog naar 8.0 # was 6
+progress reward scale naar 8.0  # was 4
+BOUNDARY_VIOLATION_PENALTY = -4.0 # was -3
+if distance_improvement <= 0:
+            progress_reward -= 0.01 # was 0.005
 --------------------------------------Two_Stage_SAC -----------------------------------------
 dit werkt niet hetzelfde als PPO
 idee is om de buffer te vullen met 30% mvp data voordat de training begint. 

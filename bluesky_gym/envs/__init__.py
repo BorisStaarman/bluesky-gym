@@ -15,4 +15,5 @@ from bluesky_gym.envs.ma_env_two_stage import *
 from bluesky_gym.envs.ma_env_two_stage_AM import *
 from bluesky_gym.envs.ma_env_two_stage_PPO import *
 from bluesky_gym.envs.ma_env_two_stage_SAC import *
+from bluesky_gym.envs.ma_env_two_stage_AM_PPO import *
 

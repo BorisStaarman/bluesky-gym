@@ -136,10 +136,19 @@ runtime_env = {
 #     runtime_env=runtime_env
 # )
 
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM\12_18\models\sectorcr_ma_sac\best_iter_17922",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_AM_11.pt",
+#     env_creator=sector_env_creator,
+#     runtime_env=runtime_env
+# )
+
+
 export_policy_torch_old_api(
-    r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM\12_18\models\sectorcr_ma_sac\best_iter_17922",
-    "shared_policy",
-    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\SAC_AM_11.pt",
+    r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage_AM\1_9_PPO\models\sectorcr_ma_sac\best_iter_00112",
+    " shared_policy",
+    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_PPO_Stage2.pt",
     env_creator=sector_env_creator,
     runtime_env=runtime_env
 )

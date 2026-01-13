@@ -26,7 +26,7 @@ NM2KM = 1.852
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with
 
-NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
+NUM_EVAL_EPISODES = 50  # How many episodes to run for evaluation
 RENDER = False # Set to True to watch the agent play
 
 # NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
@@ -46,7 +46,7 @@ USE_BEST_STAGE1_WEIGHTS = False
 
 # Determine which checkpoint to use based on the boolean flags
 if USE_STAGE2_CHECKPOINT:
-    CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/best_iter_00016")
+    CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/best_iter_00032")
     print(f"🔥 Using Stage 2 (RL Fine-Tuned) checkpoint: best_iter_00016")
 else:
     if USE_BEST_STAGE1_WEIGHTS:

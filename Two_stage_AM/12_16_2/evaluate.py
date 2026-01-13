@@ -48,7 +48,7 @@ NM2KM = 1.852
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
-# RENDER = False # Set to True to watch the agent play
+# RENDER = False # Set to True to watch the agent player
 NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
 RENDER = True # Set to True to watch the agent play
 

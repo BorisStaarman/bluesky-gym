@@ -140,8 +140,14 @@ def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file, env_crea
 # )
 
 # second time exporting stage 1 weights. now from 12_16_2 folder
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage\12_16_2\models\sectorcr_ma_sac\stage1_best_weights",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Stage1_Imitation_vs2.pt",
+# )
+
 export_policy_torch_old_api(
-    r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage\12_16_2\models\sectorcr_ma_sac\stage1_best_weights",
+    r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage\cpa_risk_fix\models\sectorcr_ma_sac\stage1_best_weights",
     "shared_policy",
-    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Stage1_Imitation_vs2.pt",
+    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_Stage1.pt",
 )

@@ -6,12 +6,60 @@ from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.annotations import override
 from gymnasium import spaces
 
+"""
+================================================================================
+MODIFIED ATTENTION ARCHITECTURE: OWNSHIP BYPASS BRANCH
+================================================================================
+
+KEY CHANGE: Ownship features (waypoint drift, speed, position) now BYPASS the
+attention mechanism and are concatenated directly with the attention output.
+
+MOTIVATION:
+-----------
+The original architecture fed ownship state into the attention query (Q),
+which could cause the attention mechanism to "filter out" critical waypoint
+drift information when intruder density is high. This led to poor waypoint
+tracking in congested scenarios.
+
+NEW ARCHITECTURE:
+-----------------
+1. **Input Splitting**: 
+   - Ownship features (7): [cos_drift, sin_drift, speed, x, y, vx, vy]
+   - Intruder features (N×5): [rel_x, rel_y, rel_vx, rel_vy, dist] per intruder
+
+2. **Attention Processing** (Intruder-Only):
+   - Query (Q): Computed from MEAN of intruder features (aggregate neighbor info)
+   - Keys (K): Projected from individual intruder features
+   - Values (V): Projected from individual intruder features
+   - Output: 15-dim context vector (3 heads × 5 features)
+
+3. **Bypass Connection**:
+   - Raw ownship features (7) skip attention entirely
+   - Concatenated with attention output: [Ownship (7) + Context (15)] = 22 features
+
+4. **Policy/Value Networks**:
+   - Input: 22-dim combined vector
+   - Hidden layers: 512 → 512 (LeakyReLU)
+   - Output: Action distribution (Actor) or Value estimate (Critic)
+
+EXPECTED BENEFITS:
+------------------
+- Preserves waypoint drift signal regardless of intruder density
+- Attention focuses purely on collision avoidance context
+- Better waypoint tracking in high-density scenarios
+- Clearer separation of concerns (navigation vs. collision avoidance)
+
+NOTE: This architectural change requires RETRAINING from Stage 1!
+================================================================================
+"""
+
 class AttentionSACModel(TorchModelV2, nn.Module):
     """
-    Corrected Implementation of Multi-Head Additive Attention (Groot et al. 2025).
+    Modified Multi-Head Additive Attention with Ownship Bypass Branch.
     - Uses 3 independent heads.
-    - Projects directly from raw inputs (7->5 and 5->5).
-    - Uses 'Relative' Intruder States (5 features).
+    - BYPASS: Ownship features (7) bypass attention and are concatenated directly with output
+    - Attention processes ONLY intruder features (5->5 projections)
+    - This prevents attention from filtering out waypoint drift during high intruder density
     """
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
@@ -31,23 +79,31 @@ class AttentionSACModel(TorchModelV2, nn.Module):
         hidden_layer_sizes = custom_config.get("hidden_dims", [256, 256])
         self.is_critic = custom_config.get("is_critic", False)
         
+        # Debug: Print action space info
+        print(f"[AttentionModel __init__] action_space: {action_space}")
+        print(f"[AttentionModel __init__] action_space type: {type(action_space)}")
+        if isinstance(action_space, spaces.Box):
+            print(f"[AttentionModel __init__] action_space.shape: {action_space.shape}")
+        
         if isinstance(action_space, spaces.Box):
             self.action_dim = int(np.product(action_space.shape))
         else:
             self.action_dim = 2 
         
-        # --- ATTENTION CONFIGURATION (STRICTLY PER PAPER) ---
-        # "Each head is the same size as Y" -> head_dim = 5
+        # --- ATTENTION CONFIGURATION (MODIFIED WITH BYPASS) ---
+        # Attention now processes ONLY intruder-to-intruder relationships
+        # Ownship features bypass attention entirely
         self.num_heads = 3
         self.head_dim = 5 
         self.total_attn_dim = self.head_dim * self.num_heads  # 3 * 5 = 15 features
 
-        # 2. Multi-Head Additive Attention Layers
-        # We create independent linear layers for each head to allow them to learn distinct features.
+        # 2. Multi-Head Additive Attention Layers (INTRUDER-ONLY)
+        # IMPORTANT: We NO LONGER use ownship for query (Q)
+        # Instead, we compute attention over intruders using intruder features as queries
         
-        # W_q: Projects Ownship (7) -> Head Dim (5)
+        # W_q: Projects INTRUDER (5) -> Head Dim (5) [CHANGED FROM OWNSHIP]
         self.W_q_heads = nn.ModuleList([
-            nn.Linear(self.ownship_dim, self.head_dim, bias=True) 
+            nn.Linear(self.intruder_dim, self.head_dim, bias=True) 
             for _ in range(self.num_heads)
         ])
         
@@ -93,6 +149,24 @@ class AttentionSACModel(TorchModelV2, nn.Module):
         self.final_layer = nn.Linear(current_dim, actual_output_dim)
         self._last_output_dim = actual_output_dim
         
+        # Add log_std parameter for PPO (needed for custom models)
+        # This allows us to control exploration by setting log_std directly
+        if not self.is_critic:
+            self.log_std = nn.Parameter(torch.zeros(self.action_dim))
+            print(f"[AttentionModel] Added log_std parameter (shape={self.log_std.shape})")
+        
+        # Add separate value function network (critical for PPO!)
+        # PPO needs this to compute advantages and VF explained variance
+        if not self.is_critic:
+            self.value_branch = nn.Sequential(
+                nn.Linear(input_dim, hidden_layer_sizes[0]),
+                nn.LeakyReLU(0.2),
+                nn.Linear(hidden_layer_sizes[0], hidden_layer_sizes[1]),
+                nn.LeakyReLU(0.2),
+                nn.Linear(hidden_layer_sizes[1], 1)
+            )
+            print(f"[AttentionModel] Added value_branch network for critic")
+        
         # Debug: Print model configuration
         print(f"[AttentionModel] Initialized with:")
         print(f"  - num_outputs (from RLlib): {num_outputs}")
@@ -104,10 +178,10 @@ class AttentionSACModel(TorchModelV2, nn.Module):
 
     @override(TorchModelV2)
     def forward(self, input_dict, state, seq_lens):
-        # 1. Input Handling
+        # 1. Input Handling & Splitting
         inputs = input_dict["obs"]
         
-        # Split: Ownship is first 7, Intruders are the rest
+        # BYPASS BRANCH: Ownship features are extracted but NOT fed into attention
         ownship_state = inputs[:, :self.ownship_dim]  # (Batch, 7)
         
         intruder_end_idx = self.ownship_dim + self.expected_intruder_size
@@ -116,16 +190,21 @@ class AttentionSACModel(TorchModelV2, nn.Module):
         # Reshape Intruders: (Batch, N, 5)
         intruder_states = intruder_flat.view(-1, self.num_intruders, self.intruder_dim)
 
-        # 2. Multi-Head Additive Attention Loop
+        # 2. Multi-Head Additive Attention Loop (INTRUDER-ONLY)
+        # Key Change: Attention operates on intruder features only
+        # Query is now computed from intruders, not ownship
         context_heads = []
         attention_weights_all_heads = []
 
         # Iterate through 3 independent experts (Heads)
         for h in range(self.num_heads):
             
-            # --- A. Linear Projections (Directly from Raw States) ---
-            # Q: Ownship (Batch, 7) -> (Batch, 5) -> Unsqueeze for broadcast (Batch, 1, 5)
-            query_h = self.W_q_heads[h](ownship_state).unsqueeze(1) 
+            # --- A. Linear Projections (INTRUDER-TO-INTRUDER) ---
+            # Q: Use mean of intruder features as query (aggregate neighbor info)
+            # Alternative: Could use first intruder, or a learnable query vector
+            # Shape: (Batch, N, 5) -> mean -> (Batch, 5) -> project -> (Batch, 5) -> unsqueeze
+            intruder_mean = intruder_states.mean(dim=1)  # (Batch, 5)
+            query_h = self.W_q_heads[h](intruder_mean).unsqueeze(1)  # (Batch, 1, 5)
             
             # K, V: Intruders (Batch, N, 5) -> (Batch, N, 5)
             keys_h = self.W_k_heads[h](intruder_states)
@@ -133,14 +212,13 @@ class AttentionSACModel(TorchModelV2, nn.Module):
             
             # --- B. Calculate Energy ---
             # Equation: tanh(Q + K + b)
-            # Note: The +b is implicit in the bias=True of the Linear layers above
             energy_h = torch.tanh(query_h + keys_h) # (Batch, N, 5)
             
             # --- C. Calculate Scores ---
             # Project vector energy to scalar score using v^T
             scores_h = torch.matmul(energy_h, self.v_att_heads[h]) # (Batch, N, 1)
             scores_h = scores_h.transpose(1, 2) # (Batch, 1, N)
-            scores_h = scores_h * 3 # TODO hierop letten want dit is zomaar toegevoegd.  # Add this scaling to encourage sharper peaks
+            scores_h = scores_h * 3  # Scaling to encourage sharper peaks
             
             # --- Masking ---
             # If an intruder slot is all zeros (padding), set score to -inf
@@ -168,21 +246,20 @@ class AttentionSACModel(TorchModelV2, nn.Module):
         self._last_attn_weights = avg_attention.detach().cpu().numpy()
         self._last_attn_weights_per_head = [a.detach().cpu().numpy() for a in attention_weights_all_heads]
 
-        # 4. Integrate into Actor/Critic
-        # Concatenate Ownship (7) + Context (15) directly
+        # 4. BYPASS CONNECTION: Concatenate Raw Ownship with Attention Context
+        # This is the key change - ownship features bypass the attention mechanism
+        # Input to policy/value networks: [Ownship (7) + Attention Context (15)] = 22 features
         if self.is_critic:
             actions = inputs[:, intruder_end_idx:]
             if actions.shape[1] == 0:
-                # print(f"[AttentionModel] forward: inputs shape: {inputs.shape}")
                 actions = torch.zeros(inputs.shape[0], self.action_dim, device=inputs.device)
-            # Critic Input: [Ownship, Context, Action]
-                # print(f"[AttentionModel] forward: ownship_state shape: {ownship_state.shape}")
+            # Critic Input: [Ownship (bypassed), Context, Action]
             x = torch.cat([ownship_state, context_vector, actions], dim=1)
         else:
-            # print(f"[AttentionModel] forward: intruder_flat shape: {intruder_flat.shape}")
-            # Actor Input: [Ownship, Context]
+            # Actor Input: [Ownship (bypassed), Context]
             x = torch.cat([ownship_state, context_vector], dim=1)
-            # print(f"[AttentionModel] forward: intruder_states shape: {intruder_states.shape}")
+            # Store this for value function computation
+            self._features = x
         
         # 5. Main Dense Network
         for layer in self.hidden_layers:
@@ -190,9 +267,14 @@ class AttentionSACModel(TorchModelV2, nn.Module):
             
         out = self.final_layer(x)
         
-        # REMOVE the padding logic. 
-        # With "free_log_std": True, PPO expects out.shape[1] == action_dim (2).
-        # Your self.final_layer is already initialized to actual_output_dim (2).
+        # For actor (not critic), append log_std to output
+        # PPO expects [mean, log_std] format when free_log_std is used
+        if not self.is_critic and hasattr(self, 'log_std'):
+            # Expand log_std to match batch size
+            batch_size = out.shape[0]
+            log_std_expanded = self.log_std.unsqueeze(0).expand(batch_size, -1)
+            # Concatenate: [mean (action_dim), log_std (action_dim)]
+            out = torch.cat([out, log_std_expanded], dim=1)
         
         if out.dim() == 1:
             out = out.unsqueeze(0)
@@ -204,12 +286,24 @@ class AttentionSACModel(TorchModelV2, nn.Module):
 
     @override(TorchModelV2)
     def value_function(self):
-        # For PPO, we need a proper value function
-        # This is a placeholder - PPO will use separate value network
+        """
+        Compute state value for PPO.
+        This uses a separate value network to evaluate the current state.
+        """
+        if not hasattr(self, 'value_branch'):
+            # Fallback for critic models
+            if hasattr(self, '_last_value'):
+                return self._last_value
+            return torch.zeros(1)
         
-        if hasattr(self, '_last_value'):
-            return self._last_value
-        return torch.zeros(1)
+        # Use stored features from last forward pass
+        if not hasattr(self, '_features'):
+            # If forward hasn't been called yet, return zeros
+            return torch.zeros(1)
+        
+        # Compute value using the value branch
+        value = self.value_branch(self._features).squeeze(-1)
+        return value
     
     @override(TorchModelV2)
     def metrics(self):

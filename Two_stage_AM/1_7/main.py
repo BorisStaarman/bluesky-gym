@@ -212,14 +212,36 @@ def stage1_imitation_loss(policy, model, dist_class, train_batch):
     else:
         teacher_targets = teacher_targets.to(predicted_actions.device)
     
-    # 4. Compute MSE loss
-    # Since predicted_actions has grad_fn, imitation_loss will too!
-    imitation_loss = F.mse_loss(predicted_actions, teacher_targets)
+    # # 4. Compute MSE loss
+    # # Since predicted_actions has grad_fn, imitation_loss will too!
+    # imitation_loss = F.mse_loss(predicted_actions, teacher_targets)
     
-    # 5. Store for logging
-    policy.loss_stats = {"imitation_loss": imitation_loss.item()}
+    # # 5. Store for logging
+    # policy.loss_stats = {"imitation_loss": imitation_loss.item()}
     
-    return imitation_loss
+    # return imitation_loss
+    
+    # NEW CODE FROM GEMINI to WEIGHT THE LOSS BASED ON TEACHER ACTIVITY
+    # 3. Calculate raw squared error (element-wise)
+    squared_error = (predicted_actions - teacher_targets) ** 2
+    
+    # --- FIX: Weighted Loss Strategy ---
+    # Calculate magnitude of teacher's action
+    # We want to punish errors MORE if the teacher is actually doing something.
+    teacher_magnitude = torch.norm(teacher_targets, dim=1, keepdim=True)
+    
+    # Create a weight vector:
+    # If teacher is acting (magnitude > 0.05), multiply weight by 10.0
+    # Otherwise keep weight at 1.0
+    weights = torch.ones_like(teacher_magnitude)
+    weights = torch.where(teacher_magnitude > 0.05, weights * 10.0, weights)
+    
+    # Apply weights (broadcasts to action dimension)
+    weighted_loss = (squared_error * weights).mean()
+    # -----------------------------------
+    
+    policy.loss_stats = {"imitation_loss": weighted_loss.item()}
+    return weighted_loss
 
 
 def build_trainer(n_agents, stage=1, restore_path=None):
@@ -591,7 +613,7 @@ def suppress_output():
         null_out.close()
         null_err.close()
 
-def run_fixed_eval(algo: Algorithm, n_episodes: int = 20, render: bool = False, n_agents: int = N_AGENTS, silent: bool = True):
+def run_fixed_eval(algo: Algorithm, n_episodes: int = 20, render: bool = False, n_agents: int = N_AGENTS, silent: bool = True, compare_teacher: bool = False):
     """Run a small deterministic evaluation (no exploration) and return metrics.
 
     Returns a dict with avg_reward, avg_length, avg_intrusions, waypoint_rate,
@@ -600,6 +622,7 @@ def run_fixed_eval(algo: Algorithm, n_episodes: int = 20, render: bool = False, 
     Args:
         silent: If True, suppresses BlueSky simulation output during evaluation.
         n_agents: Number of agents to use in evaluation environment.
+        compare_teacher: If True, print teacher (MVP) vs model actions for comparison.
     """
     # OLD API: Use get_policy instead of get_module
     policy = algo.get_policy("shared_policy")
@@ -614,10 +637,11 @@ def run_fixed_eval(algo: Algorithm, n_episodes: int = 20, render: bool = False, 
         )
         rewards, lengths, intrusions, waypoints = [], [], [], []
 
-        for _ in range(n_episodes):
+        for ep_idx in range(n_episodes):
             obs, _ = env.reset()
             ep_rew = 0.0
             ep_len = 0
+            step_count = 0
             while env.agents:
                 # OLD API: Use policy.compute_actions
                 agent_ids = list(obs.keys())
@@ -627,10 +651,26 @@ def run_fixed_eval(algo: Algorithm, n_episodes: int = 20, render: bool = False, 
                 actions_np = policy.compute_actions(obs_array, explore=False)[0]
                 
                 actions = {aid: act for aid, act in zip(agent_ids, actions_np)}
+                
+                # Compare with teacher actions if requested
+                if compare_teacher and step_count % 20 == 0:  # Print every 20 steps to avoid spam
+                    # Get teacher actions for comparison
+                    print(f"\n[Eval Episode {ep_idx+1}, Step {step_count}] Teacher vs Model Actions:")
+                    for i, agent_id in enumerate(agent_ids[:3]):  # Show first 3 agents only
+                        teacher_action = env._calculate_mvp_action(agent_id)
+                        model_action = actions_np[i]
+                        print(f"  {agent_id}:")
+                        print(f"    Teacher: [{teacher_action[0]:+.3f}, {teacher_action[1]:+.3f}]")
+                        print(f"    Model:   [{model_action[0]:+.3f}, {model_action[1]:+.3f}]")
+                        # Calculate action difference
+                        diff = np.abs(teacher_action - model_action)
+                        print(f"    Diff:    [{diff[0]:.3f}, {diff[1]:.3f}]")
+                
                 obs, rew, term, trunc, infos = env.step(actions)
                 if rew:
                     ep_rew += sum(rew.values())
                 ep_len += 1
+                step_count += 1
                 if render:
                     time.sleep(0.05)
             rewards.append(ep_rew)
@@ -933,10 +973,10 @@ if __name__ == "__main__":
             # Save periodic checkpoint
             algo.save(CHECKPOINT_DIR)
             
-            # Run custom evaluation function
+            # Run custom evaluation function with teacher comparison
             if 'run_fixed_eval' in globals():
                 try:
-                    eval_metrics = run_fixed_eval(algo, n_episodes=10, n_agents=N_AGENTS)
+                    eval_metrics = run_fixed_eval(algo, n_episodes=10, n_agents=N_AGENTS, compare_teacher=True)
                     print(f"   [Eval] Avg Reward: {eval_metrics['avg_reward']:.3f}")
                 except Exception as e:
                     print(f"   [Eval] Error: {e}")

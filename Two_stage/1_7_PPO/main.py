@@ -93,7 +93,7 @@ N_AGENTS = 20  # Number of agents for training
 RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
 
 # --- STAGE 1: IMITATION LEARNING (PPO with custom loss) ---
-iterations_stage1 = 50  # Number of iterations for Stage 1 imitation learning
+iterations_stage1 = 75  # Number of iterations for Stage 1 imitation learning
 
 
 # --- WARM-UP PHASE SETTINGS ---

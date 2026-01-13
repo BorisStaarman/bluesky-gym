@@ -26,7 +26,7 @@ NM2KM = 1.852
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with
 
-NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
+NUM_EVAL_EPISODES = 50  # How many episodes to run for evaluation
 RENDER = True # Set to True to watch the agent play
 
 # NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
@@ -87,6 +87,7 @@ if __name__ == "__main__":
     episode_aircraft_with_intrusions = []  # Track number of unique aircraft with intrusions
     total_waypoints_reached = 0
     episode_witout_intrusion = 0
+    episode_max_velocities = []  # Track max velocity reached in each episode (knots)
     # velocity_agent_1 = []
     # `polygon`_areas_km2 = []  # Store polygon area in km² for each episode
 
@@ -103,6 +104,7 @@ if __name__ == "__main__":
         
         episode_reward = 0.0
         episode_steps = 0
+        max_velocity_this_episode = 0.0  # Track max velocity in this episode
         
         # Run the episode until it's done
         while env.agents:
@@ -120,6 +122,16 @@ if __name__ == "__main__":
 
             # Step the environment
             obs, rewards, terminateds, truncateds, infos = env.step(actions)
+            
+            # Track maximum velocity across all active agents this step
+            for agent_id in agent_ids:
+                try:
+                    ac_idx = bs.traf.id2idx(agent_id)
+                    if ac_idx >= 0:
+                        airspeed_kts = bs.traf.tas[ac_idx] * MpS2Kt
+                        max_velocity_this_episode = max(max_velocity_this_episode, airspeed_kts)
+                except:
+                    pass
             
             # ac_idx = bs.traf.id2idx("KL001")
             # airspeed_kts = bs.traf.tas[ac_idx] * MpS2Kt
@@ -148,7 +160,7 @@ if __name__ == "__main__":
         print(f"   - Intrusions: {env.total_intrusions}")
         print(f"   - Aircraft with Intrusions: {aircraft_with_intrusions}/{N_AGENTS}")
         print(f"   - Waypoints Reached: {len(env.waypoint_reached_agents)}/{N_AGENTS}")
-        
+        print(f"   - Max Velocity Reached: {max_velocity_this_episode:.2f} knots")
         
         
 
@@ -157,6 +169,7 @@ if __name__ == "__main__":
         episode_intrusions.append(env.total_intrusions)
         episode_aircraft_with_intrusions.append(aircraft_with_intrusions)
         total_waypoints_reached += len(env.waypoint_reached_agents)
+        episode_max_velocities.append(max_velocity_this_episode)
 
     # --- Print Final Summary Statistics ---
     max_intrusions = max(episode_intrusions)
@@ -180,6 +193,12 @@ if __name__ == "__main__":
     waypoint_rate = (total_waypoints_reached / (NUM_EVAL_EPISODES * N_AGENTS)) * 100
     print(f"  - Overall Waypoint Reached Rate: {waypoint_rate:.1f}%")
     print(f"  - Episodes without Intrusion: {episode_witout_intrusion}")
+    
+    print(f"\n🚀 Velocity Statistics:")
+    print(f"  - Average Max Velocity per Episode: {np.mean(episode_max_velocities):.2f} knots")
+    print(f"  - Overall Maximum Velocity: {np.max(episode_max_velocities):.2f} knots")
+    print(f"  - Minimum Max Velocity: {np.min(episode_max_velocities):.2f} knots")
+    print(f"  - Std Dev: {np.std(episode_max_velocities):.2f} knots")
     
     print('average density created', N_AGENTS / np.mean(env.areas_km2))
     

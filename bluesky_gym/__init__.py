@@ -68,7 +68,7 @@ def register_envs():
         max_episode_steps=50,
     )
     
-    # the environment of the MARL scenario
+    # the environment of the MARL scenario  
     # This creator function is what RLlib will use. It takes a config dictionary
     # # and passes it as arguments to your environment's __init__ method.
     
@@ -78,6 +78,7 @@ def register_envs():
     # from bluesky_gym.envs.ma_env_two_stage import SectorEnv 
   
     # from bluesky_gym.envs.ma_env_two_stage_AM import SectorEnv
+    # from bluesky_gym.envs.ma_env_two_stage_AM_PPO import SectorEnv
     # from bluesky_gym.envs.ma_env_ppo_AM import SectorEnv
     # from bluesky_gym.envs.ma_env_two_stage_PPO import SectorEnv
     # from bluesky_gym.envs.ma_env_two_stage_SAC import SectorEnv
