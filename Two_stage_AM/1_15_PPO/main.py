@@ -9,24 +9,6 @@ import time
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 import io
 
-"""
-================================================================================
-TWO-STAGE TRAINING WITH MODIFIED ATTENTION ARCHITECTURE
-================================================================================
-
-This training script uses the MODIFIED attention model with OWNSHIP BYPASS:
-- Ownship features bypass the attention mechanism
-- Attention processes only intruder-to-intruder relationships
-- Goal: Preserve waypoint drift signal in high-density scenarios
-
-IMPORTANT: This architectural change requires training from scratch!
-- Stage 1: Imitation learning with the new bypass architecture
-- Stage 2: RL fine-tuning on top of the imitated policy
-
-See attention_model_A.py for detailed architectural documentation.
-================================================================================
-"""
-
 # Add the script directory to Python path so Ray workers can find attention_model_A
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
@@ -125,18 +107,18 @@ class MVPDataBridgeCallback(DefaultCallbacks):
 N_AGENTS = 20  # Number of agents for training
 
 # --- STAGE CONTROL ---
-RUN_STAGE_2 = False  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
+RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
 
 # --- STAGE 1: IMITATION LEARNING (PPO with custom loss) ---
-iterations_stage1 = 80  # Number of iterations for Stage 1 imitation learning
+iterations_stage1 = 75  # Number of iterations for Stage 1 imitation learning
 
 # --- WARM-UP PHASE SETTINGS ---
-WARMUP_ITERATIONS = 10  # Number of iterations to warm up critic with frozen policy and attention
+WARMUP_ITERATIONS = 6  # Number of iterations to warm up critic with frozen policy and attention
 WARMUP_LR = 1e-4  # Critic needs higher LR to learn from scratch (was 3e-5, still too low)
 FINETUNE_LR = 5e-5  # Learning rate after warm-up for joint optimization
 
 # --- STAGE 2: RL FINE-TUNING (PPO with standard loss) ---
-TOTAL_ITERS = WARMUP_ITERATIONS + 125  # Maximum total iterations for Stage 2
+TOTAL_ITERS = WARMUP_ITERATIONS + 30  # Maximum total iterations for Stage 2
 
 EVALUATION_INTERVAL = 10
 
@@ -552,8 +534,16 @@ if __name__ == "__main__":
     # and if we actually want to run stage 1.
     
     stage1_checkpoint = os.path.join(CHECKPOINT_DIR, "stage1_best_weights")
-    run_stage1 = True
-    restored_from = None  # Initialize to None - will be set if Stage 1 runs
+    run_stage1 = False
+    restored_from = None  # Initialize to None - will be set if checkpoint found or Stage 1 runs
+    
+    # Check if we are trying to resume a Stage 2 run
+    latest_checkpoint = _find_latest_checkpoint(CHECKPOINT_DIR)
+    if latest_checkpoint:
+        print(f"🔄 Found existing Stage 2 checkpoint: {latest_checkpoint}")
+        print("⏭️  Skipping Stage 1 and resuming Stage 2 directly.")
+        run_stage1 = False
+        restored_from = latest_checkpoint
     
     if run_stage1:
         print(f"\n{'='*60}")
@@ -696,6 +686,10 @@ if __name__ == "__main__":
         ray.shutdown()
         sys.exit(0)
 
+    # Update starting iteration count if we restored from a Stage 2 checkpoint
+    # (If we restored from Stage 1, algo.iteration is usually reset or 0)
+    start_iter = algo.iteration + 1
+    
     # Warm-up phase tracking
     warmup_complete = False
     
@@ -715,7 +709,6 @@ if __name__ == "__main__":
     q_loss_history = []
     reward_history = []
     episode_length_history = []
-    vf_explained_var_history = []  # Track critic accuracy
     total_training_steps = 0
     best_reward = float('-inf')
     best_reward_iteration = 0
@@ -808,7 +801,6 @@ if __name__ == "__main__":
         entropy_history.append(entropy)
         reward_history.append(mean_rew)
         episode_length_history.append(ep_len)
-        vf_explained_var_history.append(vf_explained_var)
         
         # Enhanced progress display with warm-up phase indicator
         phase_indicator = "[WARM-UP] 🧊" if i <= WARMUP_ITERATIONS else "[FINE-TUNE] 🔥"
@@ -850,81 +842,37 @@ if __name__ == "__main__":
                 try:
                     eval_metrics = run_fixed_eval(algo, n_episodes=10, n_agents=N_AGENTS, compare_teacher=True)
                     print(f"   [Eval] Avg Reward: {eval_metrics['avg_reward']:.3f}")
-                    
                     # Write evaluation metrics to CSV
                     eval_out_dir = os.path.join(METRICS_DIR, f"run_{RUN_ID}")
                     _write_eval_row(eval_metrics, i, eval_out_dir)
-                    print(f"   [Eval] Progress saved to evaluation_progress.csv")
                 except Exception as e:
                     print(f"   [Eval] Error: {e}")
 
     # ... [END OF LOOP] ...
 
     # --- Plotting (UPDATED) ---
-    # Create comprehensive training summary with 5 subplots
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    fig.suptitle(f"Stage 2 Training Summary (RUN_ID={RUN_ID})", fontsize=16, fontweight='bold')
+    # Use savefig instead of show to prevent freezing
+    fig, axes = plt.subplots(3, 1, figsize=(10, 15))
     
-    # Flatten axes for easier indexing
-    axes = axes.flatten()
-    
-    # Plot 1: Training Reward
-    axes[0].plot(reward_history, label="Reward", color="#1f77b4", linewidth=2)
+    # Plot Reward
+    axes[0].plot(reward_history, label="Reward")
     axes[0].set_title("Training Reward")
-    axes[0].set_xlabel("Iteration")
-    axes[0].set_ylabel("Reward")
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend()
+    axes[0].grid(True)
     
-    # Plot 2: Training Losses (Total, Policy, Value)
-    axes[1].plot(total_loss_history, label="Total Loss", color="#ff7f0e", linewidth=2)
-    axes[1].plot(policy_loss_history, label="Policy Loss", color="#d62728", linewidth=1.5, alpha=0.7)
-    axes[1].plot(q_loss_history, label="Value Loss", color="#9467bd", linewidth=1.5, alpha=0.7)
-    axes[1].set_title("Training Losses")
-    axes[1].set_xlabel("Iteration")
-    axes[1].set_ylabel("Loss")
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend()
+    # Plot Loss
+    axes[1].plot(total_loss_history, label="Total Loss", color="orange")
+    axes[1].set_title("Training Loss")
+    axes[1].grid(True)
     
-    # Plot 3: Policy Entropy (Exploration)
-    axes[2].plot(entropy_history, label="Entropy", color="#2ca02c", linewidth=2)
-    # Add vertical line at warmup end
-    axes[2].axvline(x=WARMUP_ITERATIONS, color='red', linestyle='--', linewidth=1.5, 
-                    label=f'Warmup End (Iter {WARMUP_ITERATIONS})', alpha=0.7)
-    axes[2].set_title("Policy Entropy (Exploration)")
-    axes[2].set_xlabel("Iteration")
-    axes[2].set_ylabel("Entropy")
-    axes[2].grid(True, alpha=0.3)
-    axes[2].legend()
-    
-    # Plot 4: Episode Length
-    axes[3].plot(episode_length_history, label="Episode Length", color="#17becf", linewidth=2)
-    axes[3].set_title("Episode Length")
-    axes[3].set_xlabel("Iteration")
-    axes[3].set_ylabel("Steps")
-    axes[3].grid(True, alpha=0.3)
-    axes[3].legend()
-    
-    # Plot 5: Value Function Explained Variance (Critic Accuracy)
-    axes[4].plot(vf_explained_var_history, label="VF Explained Var", color="#ff9896", linewidth=2)
-    axes[4].axhline(y=1.0, color='green', linestyle='--', linewidth=1, label='Perfect (1.0)', alpha=0.5)
-    axes[4].axhline(y=0.0, color='gray', linestyle='--', linewidth=1, label='Random (0.0)', alpha=0.5)
-    axes[4].axvline(x=WARMUP_ITERATIONS, color='red', linestyle='--', linewidth=1.5, 
-                    label=f'Warmup End (Iter {WARMUP_ITERATIONS})', alpha=0.7)
-    axes[4].set_title("Value Function Explained Variance (Critic Accuracy)")
-    axes[4].set_xlabel("Iteration")
-    axes[4].set_ylabel("Explained Variance")
-    axes[4].grid(True, alpha=0.3)
-    axes[4].legend(loc='lower right', fontsize=8)
-    axes[4].set_ylim([-0.1, 1.1])  # Set reasonable bounds
-    
-    # Hide the 6th subplot (we only need 5)
-    axes[5].axis('off')
+    # Plot Ep Length
+    axes[2].plot(episode_length_history, label="Ep Length", color="green")
+    axes[2].set_title("Episode Length")
+    axes[2].grid(True)
     
     plot_path = os.path.join(METRICS_DIR, f"training_summary_{RUN_ID}.png")
     plt.tight_layout()
-    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.savefig(plot_path)
     print(f"\n📊 Training plots saved to: {plot_path}")
-    plt.close()  # Close memory
+    plt.close() # Close memory
 
     ray.shutdown()

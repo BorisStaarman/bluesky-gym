@@ -64,14 +64,13 @@ CPA_TIME_HORIZON_S = 15 # seconds
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 6.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 4.0  # Scale factor for distance-to-waypoint progress
+WAYPOINT_REACHED_REWARD = 10.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 5.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
 BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
 PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary
-
 
 # logging
 LOG_EVERY_N = 100  # throttle repeated warnings
@@ -1220,14 +1219,16 @@ class SectorEnv(MultiAgentEnv):
                 cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
                 airspeed = bs.traf.tas[ac_idx] / 18 # normalize on to a max of 18 m/s (~35 kt)
                 
-                # Ownship location (relative to center)
+                # Get ownship position in meters from center
                 ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
-                own_dx = float(ac_loc[0]) / 8500.0  # Normalized x position
-                own_dy = float(ac_loc[1]) / 8000.0  # Normalized y position
                 
-                # Ownship velocity
-                vx = (np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  # normalize on to a max of 18 m/s (~35 kt)
-                vy = (np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  # normalize on to a max of 18 m/s (~35 kt)
+                # Ownship position features (normalized, in meters from center)
+                dx = float(ac_loc[0]) / 8500.0
+                dy = float(ac_loc[1]) / 8000.0
+                
+                # Ownship velocity (raw m/s, will be normalized when constructing final vector)
+                vx = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
+                vy = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
                 
                 # maybe for determining the relative position of other ac
                 # own_lat = bs.traf.lat[ac_idx]
@@ -1253,16 +1254,16 @@ class SectorEnv(MultiAgentEnv):
                     other_agent_id = self.agents[i] if i < len(self.agents) else None
                     int_hdg = bs.traf.hdg[i]
                     int_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[i], bs.traf.lon[i]])) * NM2KM * 1000
-                    dx = float(int_loc[0] - ac_loc[0]) / 8500.0
-                    dy = float(int_loc[1] - ac_loc[1]) / 8000.0
+                    dxi = float(int_loc[0] - ac_loc[0]) / 8500.0
+                    dyi = float(int_loc[1] - ac_loc[1]) / 8000.0
                     
                     vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
                     vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]
                     dvx = float(vxi - vx) / 36.0
                     dvy = float(vyi - vy) / 36.0
                     
-                    d_now = float(np.hypot(dx, dy)) 
-                    risk = SectorEnv._cpa_risk(dx, dy, dvx, dvy)
+                    d_now = float(np.hypot(dxi, dyi)) 
+                    # risk = SectorEnv._cpa_risk(dxi, dyi, dvx, dvy)  # Commented out - not used
                     # Calculate distance between ownship and intruder (in nautical miles)
                     # _, distance_nm = bs.tools.geo.kwikqdrdist(
                     #     bs.traf.lat[ac_idx], bs.traf.lon[ac_idx],
@@ -1271,15 +1272,15 @@ class SectorEnv(MultiAgentEnv):
                     # Normalize distance (typical max ~1 NM in this scenario)
                     # distance_normalized = float(distance_nm)
                     
-                    # Store (d_now, dx, dy, dvx, dvy, risk, agent_id)
-                    candidates.append((d_now, dx, dy, dvx, dvy, risk, other_agent_id))
+                    # Store (d_now, dxi, dyi, dvx, dvy, agent_id)
+                    candidates.append((d_now, dxi, dyi, dvx, dvy, other_agent_id))
 
                 # Sort by distance (shortest first) and take top NUM_AC_STATE neighbors
                 candidates.sort(key=lambda x: x[0]) # sort on shortest distance (d_now at index 0)
                 top = candidates[:NUM_AC_STATE]
                     
                 # Store neighbor mapping for attention visualization (neighbor IDs sorted by distance)
-                self.neighbor_mapping[agent] = [c[6] for c in top if c[6] is not None]
+                self.neighbor_mapping[agent] = [c[5] for c in top if c[5] is not None]
 
                 # --- 3. Construct Vector ---
                 # We iterate through neighbors and append ALL features for that neighbor sequentially.
@@ -1291,25 +1292,24 @@ class SectorEnv(MultiAgentEnv):
                     if i < len(top):
                         # Extract features from tuple
                         t = top[i]
-                        # Indices: 0=distance, 1=dx_rel, 2=dy_rel, 3=vx_rel, 4=vy_rel, 5=id
-                        d_now, dx, dy, dvx, dvy = t[0], t[1], t[2], t[3], t[4]
+                        # Indices: 0=distance, 1=dxi, 2=dyi, 3=dvx, 4=dvy, 5=id
+                        d_now, dxi, dyi, dvx, dvy = t[0], t[1], t[2], t[3], t[4]
                         
                         # Update max values for normalization analysis
                         # self.max_d_now = max(self.max_d_now, abs(d_now))
-                        # self.max_dx = max(self.max_dx, abs(dx))
-                        # self.max_dy = max(self.max_dy, abs(dy))
+                        # self.max_dxi = max(self.max_dxi, abs(dxi))
+                        # self.max_dyi = max(self.max_dyi, abs(dyi))
                         # self.max_dvx = max(self.max_dvx, abs(dvx))
                         # self.max_dvy = max(self.max_dvy, abs(dvy))
                         
                         # Append 5 features for this intruder
-                        intruder_features.extend([d_now, dx, dy, dvx, dvy])
+                        intruder_features.extend([d_now, dxi, dyi, dvx, dvy])
                     else:
                         # Padding (5 zeros per missing agent)
                         intruder_features.extend([0.0] * 5)
 
                 # Concatenate Ownship + Intruders
-                # Use own_dx/own_dy (ownship's position), NOT dx/dy from intruder loop
-                ownship_feats = np.array([cos_drift, sin_drift, airspeed, own_dx, own_dy, vx, vy], dtype=np.float32)
+                ownship_feats = np.array([cos_drift, sin_drift, airspeed, dx, dy, vx / 18.0, vy / 18.0], dtype=np.float32)
                 intruder_feats = np.array(intruder_features, dtype=np.float32)
                 
                 vec = np.concatenate([ownship_feats, intruder_feats])
@@ -1493,8 +1493,6 @@ class SectorEnv(MultiAgentEnv):
         
         # Option 2: Only give positive rewards (no penalty for moving away) - CURRENTLY ACTIVE
         # progress_reward = max(0, distance_improvement * PROGRESS_REWARD_SCALE)
-        if distance_improvement <= 0:
-            progress_reward -= 0.005 #
         
         return progress_reward
     
@@ -1582,7 +1580,7 @@ class SectorEnv(MultiAgentEnv):
         # Option 2: Only give positive rewards (no penalty for moving away) - CURRENTLY ACTIVE
         # progress_reward = max(0, distance_improvement * PROGRESS_REWARD_SCALE)
         
-        # return progress_reward
+        return progress_reward
 
     def _do_action_nn(self, actions):
         """Apply neural network output actions to BlueSky simulator.

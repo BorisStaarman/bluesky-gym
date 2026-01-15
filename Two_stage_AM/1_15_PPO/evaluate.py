@@ -51,7 +51,7 @@ N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
 # RENDER = False # Set to True to watch the agent play
 NUM_EVAL_EPISODES = 20  # How many episodes to run for evaluation
-RENDER = True # Set to True to watch the agent play
+RENDER = False # Set to True to watch the agent play
 
 # This path MUST match the checkpoint directory from your main.py training script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -66,9 +66,9 @@ USE_BEST_STAGE1_WEIGHTS = False
 # Determine which checkpoint to use based on the boolean
 if USE_BEST_STAGE1_WEIGHTS:
     CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/stage1_best_weights")
-    print(f"🌟 Using BEST Stage 1 weights: stage1_best_weights")
+    print(f"🌟 Using BEST Stage 1 weights from: {CHECKPOINT_DIR}")
 else:
-    CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/best_iter_00112")
+    CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/best_iter_00036")
     print(f"📁 Using stage 2 weights {CHECKPOINT_DIR}")
 
 

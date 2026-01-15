@@ -65,12 +65,13 @@ DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
 WAYPOINT_REACHED_REWARD = 6.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 2.0  # Scale factor for distance-to-waypoint progress
+PROGRESS_REWARD_SCALE = 4.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
 BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
 PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary
+
 
 # logging
 LOG_EVERY_N = 100  # throttle repeated warnings
@@ -1219,14 +1220,18 @@ class SectorEnv(MultiAgentEnv):
                 cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
                 airspeed = bs.traf.tas[ac_idx] / 18 # normalize on to a max of 18 m/s (~35 kt)
                 
-                # location
-                # dx = (bs.traf.lon[ac_idx] - x_origin) / MAX_LAT_LON # normalized  difference in longitude TODO dit misschien nog * 100 doen ofzo om wat zwaarder mee te laten tellen?
-                # dy = (bs.traf.lat[ac_idx] - y_origin) / MAX_LAT_LON # difference in latitude
-                
-                # velocity
-                vx = (np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  # normalize on to a max of 18 m/s (~35 kt)
-                vy = (np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  # normalize on to a max of 18 m/s (~35 kt)
+                # Ownship location (relative to center)
                 ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
+                own_dx = float(ac_loc[0]) / 1000.0 # Normalized x position
+                own_dy = float(ac_loc[1]) / 1000.0 # Normalized y position
+                
+                # Ownship velocity
+                vx = (np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  ) /18 # normalize on to a max of 18 m/s (~35 kt)
+                vy = (np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  /18 # normalize on to a max of 18 m/s (~35 kt)
+                
+                # # print the vx and vy for debugging
+                # if agent == "KL001":
+                #     print(f"agent={agent}, vx={vx:.2f}, vy={vy:.2f}, hdg={ac_hdg:.1f}°")
                 
                 # maybe for determining the relative position of other ac
                 # own_lat = bs.traf.lat[ac_idx]
@@ -1255,13 +1260,15 @@ class SectorEnv(MultiAgentEnv):
                     dx = float(int_loc[0] - ac_loc[0]) / 8500.0
                     dy = float(int_loc[1] - ac_loc[1]) / 8000.0
                     
-                    vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
-                    vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]
-                    dvx = float(vxi - vx) / 36.0
-                    dvy = float(vyi - vy) / 36.0
+                    vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i] / 18
+                    vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i] / 18
+                    dvx = float(vxi - vx) / 2.0 #  normalize to 1
+                    dvy = float(vyi - vy) / 2.0 # normalize to 1 
                     
                     d_now = float(np.hypot(dx, dy)) 
-                    risk = SectorEnv._cpa_risk(dx, dy, dvx, dvy)
+                    
+                    # risk = SectorEnv._cpa_risk(dx, dy, dvx, dvy)
+                    
                     # Calculate distance between ownship and intruder (in nautical miles)
                     # _, distance_nm = bs.tools.geo.kwikqdrdist(
                     #     bs.traf.lat[ac_idx], bs.traf.lon[ac_idx],
@@ -1271,14 +1278,14 @@ class SectorEnv(MultiAgentEnv):
                     # distance_normalized = float(distance_nm)
                     
                     # Store (d_now, dx, dy, dvx, dvy, risk, agent_id)
-                    candidates.append((d_now, dx, dy, dvx, dvy, risk, other_agent_id))
+                    candidates.append((d_now, dx, dy, dvx, dvy, other_agent_id))
 
                 # Sort by distance (shortest first) and take top NUM_AC_STATE neighbors
                 candidates.sort(key=lambda x: x[0]) # sort on shortest distance (d_now at index 0)
                 top = candidates[:NUM_AC_STATE]
                     
                 # Store neighbor mapping for attention visualization (neighbor IDs sorted by distance)
-                self.neighbor_mapping[agent] = [c[6] for c in top if c[6] is not None]
+                self.neighbor_mapping[agent] = [c[5] for c in top if c[5] is not None]
 
                 # --- 3. Construct Vector ---
                 # We iterate through neighbors and append ALL features for that neighbor sequentially.
@@ -1307,7 +1314,8 @@ class SectorEnv(MultiAgentEnv):
                         intruder_features.extend([0.0] * 5)
 
                 # Concatenate Ownship + Intruders
-                ownship_feats = np.array([cos_drift, sin_drift, airspeed, dx, dy, vx, vy], dtype=np.float32)
+                # Use own_dx/own_dy (ownship's position), NOT dx/dy from intruder loop
+                ownship_feats = np.array([cos_drift, sin_drift, airspeed, own_dx, own_dy, vx, vy], dtype=np.float32)
                 intruder_feats = np.array(intruder_features, dtype=np.float32)
                 
                 vec = np.concatenate([ownship_feats, intruder_feats])
@@ -1491,6 +1499,8 @@ class SectorEnv(MultiAgentEnv):
         
         # Option 2: Only give positive rewards (no penalty for moving away) - CURRENTLY ACTIVE
         # progress_reward = max(0, distance_improvement * PROGRESS_REWARD_SCALE)
+        if distance_improvement <= 0:
+            progress_reward -= 0.005 #
         
         return progress_reward
     
@@ -1578,7 +1588,7 @@ class SectorEnv(MultiAgentEnv):
         # Option 2: Only give positive rewards (no penalty for moving away) - CURRENTLY ACTIVE
         # progress_reward = max(0, distance_improvement * PROGRESS_REWARD_SCALE)
         
-        return progress_reward
+        # return progress_reward
 
     def _do_action_nn(self, actions):
         """Apply neural network output actions to BlueSky simulator.

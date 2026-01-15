@@ -21,7 +21,7 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.models import ModelCatalog
 from attention_model_A import AttentionSACModel # additive method
 
-from bluesky_gym.envs.ma_env_two_stage_AM_PPO import SectorEnv
+from bluesky_gym.envs.ma_env_two_stage_AM import SectorEnv
 from ray.tune.registry import register_env
 
 import torch
@@ -51,7 +51,7 @@ N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
 # RENDER = False # Set to True to watch the agent play
 NUM_EVAL_EPISODES = 20  # How many episodes to run for evaluation
-RENDER = True # Set to True to watch the agent play
+RENDER = False # Set to True to watch the agent play
 
 # This path MUST match the checkpoint directory from your main.py training script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -59,7 +59,7 @@ METRICS_DIR = os.path.join(script_dir, "metrics")
 
 # --- CHOOSE WHICH CHECKPOINT TO EVALUATE ---
 # Set to True to use stage1_best_weights, False to use stage1_weights (last iteration)
-USE_BEST_STAGE1_WEIGHTS = False
+USE_BEST_STAGE1_WEIGHTS = True
 
 
 
@@ -68,8 +68,8 @@ if USE_BEST_STAGE1_WEIGHTS:
     CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/stage1_best_weights")
     print(f"🌟 Using BEST Stage 1 weights: stage1_best_weights")
 else:
-    CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/best_iter_00112")
-    print(f"📁 Using stage 2 weights {CHECKPOINT_DIR}")
+    CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/best_iter_00087")
+    print(f"📁 Using STAGE 2 weights: best_iter_00087")
 
 
 if __name__ == "__main__":
@@ -92,131 +92,12 @@ if __name__ == "__main__":
     print(f"\n🎯 Evaluating policy from checkpoint:")
     print(f"   {CHECKPOINT_DIR}\n")
 
-    # --- Build algorithm configuration and restore weights ---
-    # Define policy mapping
-    def policy_map(agent_id, *_, **__):
-        return "shared_policy"
+    # --- Load the trained algorithm and policy ---
+    algo = Algorithm.from_checkpoint(CHECKPOINT_DIR)
     
-    # Build PPO config (should match training configuration)
-    from ray.rllib.algorithms.ppo import PPOConfig
-    
-    cfg = (
-        PPOConfig()
-        .api_stack(
-            enable_rl_module_and_learner=False,
-            enable_env_runner_and_connector_v2=False,
-        )
-        .environment(
-            "sector_env",
-            env_config={
-                "n_agents": N_AGENTS,
-                "run_id": RUN_ID,
-                "metrics_base_dir": METRICS_DIR,
-            },
-            disable_env_checking=True,
-        )
-        .framework("torch")
-        .env_runners(
-            num_env_runners=0,  # No workers needed for evaluation
-            num_envs_per_env_runner=1,
-        )
-        .training(
-            lr=1e-4,  # Doesn't matter for evaluation but needs to match structure
-            train_batch_size=16000,
-            minibatch_size=1024,
-            model={
-                "custom_model": "attention_sac",
-                "custom_model_config": {
-                    "hidden_dims": [512, 512],
-                    "is_critic": False,
-                    "n_agents": N_AGENTS,
-                    "embed_dim": 128,
-                },
-                "free_log_std": True,
-                "vf_share_layers": False,
-            },
-        )
-        .multi_agent(
-            policies={"shared_policy": (None, None, None, {})},
-            policy_mapping_fn=policy_map,
-        )
-        .resources(num_gpus=0)
-    )
-    
-    # Build algorithm
-    algo = cfg.build()
-    
-    # Get policy (before restoring)
+    # OLD API: Get policy from workers, not module
+    # module = algo.get_module("shared_policy")  # This is NEW API only
     policy = algo.get_policy("shared_policy")
-    
-    # --- Manually load ONLY model weights (skip optimizer state) ---
-    print(f"📥 Loading model weights from: {CHECKPOINT_DIR}")
-    
-    import pickle
-    
-    # RLlib checkpoint structure: policies/shared_policy/policy_state.pkl
-    policy_state_path = os.path.join(CHECKPOINT_DIR, "policies", "shared_policy", "policy_state.pkl")
-    
-    if os.path.exists(policy_state_path):
-        print(f"   Found policy state at: {policy_state_path}")
-        
-        with open(policy_state_path, "rb") as f:
-            policy_state = pickle.load(f)
-        
-        # Load only model weights, not optimizer state
-        if "weights" in policy_state:
-            model_weights = policy_state["weights"]
-            
-            # Convert numpy arrays to torch tensors
-            model_weights_converted = {}
-            for key, value in model_weights.items():
-                if isinstance(value, np.ndarray):
-                    model_weights_converted[key] = torch.from_numpy(value)
-                else:
-                    model_weights_converted[key] = value
-            
-            # Load with strict=False to allow missing keys (log_std, value_branch)
-            # These were added after the checkpoint was saved
-            missing_keys, unexpected_keys = policy.model.load_state_dict(model_weights_converted, strict=False)
-            
-            if missing_keys:
-                print(f"⚠️  Missing keys (will use randomly initialized values): {missing_keys}")
-            if unexpected_keys:
-                print(f"⚠️  Unexpected keys (ignored): {unexpected_keys}")
-            
-            print(f"✅ Model weights loaded successfully (skipped optimizer state)")
-        else:
-            print(f"⚠️  Warning: 'weights' key not found in policy state")
-            print(f"   Available keys: {list(policy_state.keys())}")
-            
-            # Sometimes weights are stored directly in the state dict
-            try:
-                # Convert all numpy arrays to tensors
-                converted_state = {}
-                for key, value in policy_state.items():
-                    if isinstance(value, np.ndarray):
-                        converted_state[key] = torch.from_numpy(value)
-                    else:
-                        converted_state[key] = value
-                
-                policy.model.load_state_dict(converted_state, strict=False)
-                print(f"✅ Loaded weights directly from policy_state")
-            except Exception as e:
-                print(f"❌ Failed to load weights: {e}")
-                ray.shutdown()
-                exit()
-    else:
-        print(f"❌ Could not find policy state file at: {policy_state_path}")
-        print(f"   Checkpoint directory contents:")
-        for root, dirs, files in os.walk(CHECKPOINT_DIR):
-            level = root.replace(CHECKPOINT_DIR, '').count(os.sep)
-            indent = ' ' * 2 * level
-            print(f"   {indent}{os.path.basename(root)}/")
-            subindent = ' ' * 2 * (level + 1)
-            for file in files:
-                print(f"   {subindent}{file}")
-        ray.shutdown()
-        exit()
     
     # DEBUG: Check the model's final layer output dimension
     model = policy.model

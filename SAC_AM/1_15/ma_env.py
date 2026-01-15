@@ -5,15 +5,11 @@ import pygame
 import bluesky as bs
 from bluesky_gym.envs.common.screen_dummy import ScreenDummy
 import bluesky_gym.envs.common.functions as fn
-from bluesky_gym.envs.mvp_2d import MVP_2D
 import csv, os, shutil
 from collections import defaultdict 
 import time
 
-# Code to train a Neural Network to behave like the MVP method. 
-# This is the first stage of the training process
-
-
+N_AGENTS = 20
 
 # scenario constants
 POLY_AREA_RANGE = (0.75, 0.8)
@@ -25,7 +21,7 @@ ALTITUDE = 360
 AC_SPD = 9 # starting speed, in m/s !
 AC_TYPE = "M600"
 INTRUSION_DISTANCE = 1 / 1852 * 100  # was 0.054
-MIN_SPAWN_SEPARATION_NM = 1 / 1852 * 125  # dit is  van 125 meter
+MIN_SPAWN_SEPARATION_NM = 1 / 1852 * 125  # dit is iets van 125 meter
 COLLISION_DISTANCE = 1 / 1852 * 100  # 100 meters - collision threshold (terminates both aircraft)
 
 # conversion factors
@@ -33,44 +29,50 @@ NM2KM = 1.852
 MpS2Kt = 1.94384
 FT2M = 0.3048
 
-MAX_LAT_LON = 0.013749
-
-N_AGENTS = 20
-
 # model settings
-ACTION_FREQUENCY = 1 # how many sim MVP_2Ds per action
+ACTION_FREQUENCY = 1 # how many sim steps per action
 NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
 MAX_STEPS = 400 # max steps per episode
+
+# reward function parameters
+DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
+INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
+WAYPOINT_REACHED_REWARD = 2.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 2.0  # Scale factor for distance-to-waypoint progress
+PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
+BOUNDARY_VIOLATION_PENALTY = -2.0  # Penalty for leaving polygon boundary (not at waypoint)
+STEP_PENALTY = -0.012  # Small penalty applied every step to encourage efficiency
+
+# Proximity penalty parameters
+SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance (150m when intrusion is 100m)
+PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary (100m)
 
 # constants to control actions, 
 D_HEADING = 45 # degrees
 D_VELOCITY = 10/3 # knots
+# waypoint rewards
+WAYPOINT_RADIUS = 0.05 # in NM is about 90 meters
 
-# THIS SHOULD be 1.87 km 
+# normalization parameters
+# MAX_SCENARIO_DIM_M = (POLY_AREA_RANGE[1] + POLY_AREA_RANGE[0])/2 * NM2KM * 1000.0 * 2.0 # Old value
+# new value from scenario calculatec 
+
+#NORMALIZER LAT LON
+MAX_LAT_LON = 0.013749
+
 MAX_SCENARIO_DIM_M = 1870.0
 
-# Normalization constants for observations
+# For distance: all negative means center is too high; reduce multiplier from 2.5 to 1.5
 DISTANCE_CENTER_M = MAX_SCENARIO_DIM_M / 2.0
 DISTANCE_SCALE_M = MAX_SCENARIO_DIM_M / 2.0 * 1.5
-MAX_RELATIVE_VEL_MS = 70.0  # Maximum relative velocity in m/s
+# For vx_r, vy_r: observed max ~1.42, increase from 50 to 75 m/s
+MAX_RELATIVE_VEL_MS = 70.0 # TODO dit is knts ipv m/s
 AIRSPEED_CENTER_KTS = 35.0
 AIRSPEED_SCALE_KTS = 10.0 * 3.4221
 
 # collision risk parameters
 PROTECTED_ZONE_M = 100  # meters
 CPA_TIME_HORIZON_S = 15 # seconds
-
-# Reward parameters
-DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
-STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
-WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 6.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 2.0  # Scale factor for distance-to-waypoint progress
-PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
-BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
-SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
-INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
-PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary
 
 # logging
 LOG_EVERY_N = 100  # throttle repeated warnings
@@ -82,48 +84,50 @@ METRICS_BASE_DIR = "metrics"  # Fallback (not used when passed via env_config)
 class SectorEnv(MultiAgentEnv):
     metadata = {"name": "ma_env", "render_modes": ["rgb_array", "human"], "render_fps": 10}
 
-    def __init__(self, render_mode=None, n_agents=30, run_id="default",
+    def __init__(self, render_mode=None, n_agents=20, run_id="default",
                  debug_obs=False, debug_obs_episodes=2, debug_obs_interval=1, debug_obs_agents=None,
                  collect_obs_stats=False, print_obs_stats_per_episode=False,
                  intrusion_penalty=None, proximity_max_penalty=None, metrics_base_dir=None, center=None):
         super().__init__()
         
         self.render_mode = render_mode
-        
-        # Debug and stats tracking settings
-        self.debug_obs = debug_obs
-        self.debug_obs_episodes = debug_obs_episodes
-        self.debug_obs_interval = debug_obs_interval
-        self.debug_obs_agents = debug_obs_agents
-        self.collect_obs_stats = collect_obs_stats
-        self._print_obs_stats_per_episode = print_obs_stats_per_episode
-        
-        # Observation statistics tracking
-        self._obs_stats_enabled = collect_obs_stats
-        self._obs_stats = {
-            "min": None,
-            "max": None,
-            "mean": None,
-            "M2": None,
-            "count": 0
-        }
-        self._obs_stats_csv_path = None  # Will be set later if needed
-        
         # Use provided intrusion penalty or default from module constant
         self.intrusion_penalty = intrusion_penalty if intrusion_penalty is not None else INTRUSION_PENALTY
         # Use provided proximity penalty or default from module constant
         self.proximity_max_penalty = proximity_max_penalty if proximity_max_penalty is not None else PROXIMITY_MAX_PENALTY
-        
         self.num_ac = n_agents
+        
         # Use provided center or default - this is the reference point for relative coordinates
         self.center = np.array(center) if center is not None else CENTER
-        self.window_width = 768 
-        self.window_height = 768 
+        self.window_width = 512 
+        self.window_height = 512 
         self.window_size = (self.window_width, self.window_height)
         self.poly_name = 'airspace'
-        self._agent_ids = {f'kl00{i+1}'.upper() for i in range(n_agents)}
+        # Use zero-padding to ensure proper alphabetical sorting (KL0001, KL0002, ..., KL0020)
+        # Width 4 supports up to 9999 agents
+        self._agent_ids = {f'KL{str(i+1).zfill(4)}' for i in range(n_agents)}
         self.agents = []
         
+        
+        # debug/inspection controls for observation vectors
+        self.debug_obs = bool(debug_obs)
+        self.debug_obs_episodes = int(debug_obs_episodes)
+        self.debug_obs_interval = max(1, int(debug_obs_interval))
+        # None or iterable of agent ids to print; if None, print all
+        self.debug_obs_agents = set(debug_obs_agents) if debug_obs_agents else None
+        self._episode_index = 0
+        self._env_step = 0
+        
+        # observation statistics (for proper normalization analysis)
+        self._obs_stats_enabled = bool(collect_obs_stats)
+        self._print_obs_stats_per_episode = bool(print_obs_stats_per_episode)
+        self._obs_stats = {
+            "count": 0,
+            "min": None,
+            "max": None,
+            "mean": None,  # Welford online mean
+            "M2": None,    # Welford running variance accumulator
+        }
         
         # for multi agent csv files
         # --- per-agent CSV logging (safe for multi-worker) ---
@@ -131,7 +135,6 @@ class SectorEnv(MultiAgentEnv):
         self._flush_threshold = 5  # tune if you want more/less frequent writes
         self._agent_buffers = defaultdict(list)
         self._agent_episode_index = defaultdict(int)
-        self._episode_index = 0  # Global episode counter
         
         # Use provided metrics base dir or fall back to module constant
         metrics_base = metrics_base_dir if metrics_base_dir is not None else METRICS_BASE_DIR
@@ -163,13 +166,17 @@ class SectorEnv(MultiAgentEnv):
         self._rewards_counts = {}              # per-agent step counts for safe averaging
         self._intrusions_acc = {}              # per-agent intrusion counts during the episode
                 
+        # Define observation and action spaces for RLlib
+        # Observation: 7 ownship features + 5 features per intruder
+        # Ownship: cos_drift, sin_drift, airspeed, x, y, vx, vy
+        # Intruder: distance, dx_rel, dy_rel, vx_rel, vy_rel
         single_obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(7 + 5 * NUM_AC_STATE,), dtype=np.float32)
         single_action_space = spaces.Box(-1, 1, shape=(2,), dtype=np.float32)
         
         self.areas_km2 = []
         
-        self.observation_space = spaces.Dict({agent_id: single_obs_space for agent_id in self._agent_ids})
-        self.action_space = spaces.Dict({agent_id: single_action_space for agent_id in self._agent_ids})
+        self.observation_space = single_obs_space
+        self.action_space = single_action_space
         
         bs.init(mode='sim', detached=True)
         bs.scr = ScreenDummy()
@@ -181,22 +188,6 @@ class SectorEnv(MultiAgentEnv):
         self.agent_waypoints = {}
         self.previous_distances = {}
         self.waypoint_reached_agents = set()
-        
-        # Initialize MVP solver for Stage 1 teacher
-        self.mvp_solver = MVP_2D(
-            safe_distance=PROTECTED_ZONE_M,# TODO is dit in meter? zou raar zijn toch, moet in NM
-            lookahead_time=CPA_TIME_HORIZON_S
-        )
-        
-        # Track maximum risk value (before capping)
-        self.max_risk_uncapped = 0.0
-        
-        # Track maximum observation values for normalization analysis
-        self.max_d_now = 0.0
-        self.max_dx = 0.0
-        self.max_dy = 0.0
-        self.max_dvx = 0.0
-        self.max_dvy = 0.0
 
     @staticmethod
     def compute_relative_position(center, lat, lon):
@@ -221,15 +212,6 @@ class SectorEnv(MultiAgentEnv):
         # episode counters
         self._episode_index += 1
         self._env_step = 0
-        
-        # Print max observation values for normalization analysis (every 100 episodes)
-        if self._episode_index % 100 == 0:
-            print(f"\n[Episode {self._episode_index}] Max observation values:")
-            print(f"  max_d_now:  {self.max_d_now:.4f} m")
-            print(f"  max_dx:     {self.max_dx:.4f} m")
-            print(f"  max_dy:     {self.max_dy:.4f} m")
-            print(f"  max_dvx:    {self.max_dvx:.4f} m/s")
-            print(f"  max_dvy:    {self.max_dvy:.4f} m/s")
         # for savin  data in csv file
         self._agent_steps = {a: 0 for a in self.agents}
         self._rewards_acc = {a: {"drift": 0.0, "progress": 0.0, "intrusion": 0.0, "path_efficiency": 0.0, "boundary": 0.0, "step": 0.0, "proximity": 0.0} for a in self.agents}
@@ -238,13 +220,16 @@ class SectorEnv(MultiAgentEnv):
         # Track which drone pairs have already received intrusion penalty this episode
         self._penalized_pairs = set()  # Store tuples of (agent1, agent2) where agent1 < agent2
         self._pairs_penalized_this_step = set()  # Temporary buffer for pairs penalized in current step
+        # Track collisions
         self.collided_agents = set()  # Agents that have collided and should be terminated
-
         # for evaluation
         self.total_intrusions = 0
         
         self.previous_distances = {}
         self.waypoint_reached_agents = set()
+        
+        # Reset start positions for path efficiency tracking
+        self._agent_start_positions = {}
         
         self._generate_polygon()
         self._generate_waypoints()
@@ -265,26 +250,16 @@ class SectorEnv(MultiAgentEnv):
         observations = self._get_observation(self.agents)
         self._update_obs_stats(observations)
         self._maybe_print_observations(observations, when="reset")
-        # --- FIX: Calculate Teacher Action for the Reset Step ---
-        infos = {}
-        for agent in self.agents:
-            infos[agent] = {}
-            # Calculate what the teacher would do NOW (at the start)
-            infos[agent]["teacher_action"] = self._calculate_mvp_action(agent)
-        
-        
+        infos = {agent: {} for agent in self.agents}
         return observations, infos
 
-    # new method for stepping the environment
     def step(self, actions):
         agents_in_step = list(self.agents)
         
         # Clear the temporary buffer for this step (symmetric penalty tracking)
         self._pairs_penalized_this_step = set()
         
-        # Apply actions to BlueSky
-        self._do_action_nn(actions)
-        
+        self._do_action(actions)
         for _ in range(ACTION_FREQUENCY):
             bs.sim.step()
 
@@ -300,23 +275,11 @@ class SectorEnv(MultiAgentEnv):
         self._maybe_print_observations(observations, when="step")
         rewards, infos = self._get_reward(agents_in_step)
         
-        # Teacher action
-        # Loop through every agent active in this step
-        for agent_id in agents_in_step:
-            # 1. Ask your MVP method: "What is the perfect move right now?"
-            teacher_velocity = self._calculate_mvp_action(agent_id)
-            
-            # 2. Ensure the agent has an info dict (just in case _get_reward didn't make one)
-            if agent_id not in infos:
-                infos[agent_id] = {}
-
-            # 3. Store the teacher's answer in the info dict
-            # This allows the Callback to find it later and pass it to the Loss Function
-            infos[agent_id]["teacher_action"] = teacher_velocity
-        # ==================================================================
-        
         # Note: _pairs_penalized_this_step is cleared at the start of each step
         # This allows the same pair to be penalized again in the next timestep
+        
+        # Check for collisions (disabled - agents no longer removed on collision)
+        # self._check_collisions(agents_in_step)
         
         terminateds = self._get_terminateds(agents_in_step)
         truncateds = self._get_truncateds(agents_in_step)
@@ -337,6 +300,7 @@ class SectorEnv(MultiAgentEnv):
             
             # Determine termination reason
             waypoint_reached = a in self.waypoint_reached_agents
+            collided = a in self.collided_agents
             truncated = truncateds.get(a, False)
 
             # buffer one row for THIS agent only
@@ -359,6 +323,7 @@ class SectorEnv(MultiAgentEnv):
                 "sum_reward_proximity": self._rewards_acc.get(a, {}).get("proximity", 0.0),
                 "total_intrusions":     self._intrusions_acc.get(a, 0),
                 "terminated_waypoint": waypoint_reached,  # True if agent reached waypoint
+                "terminated_collision": collided,  # True if agent collided with another aircraft
                 "truncated": truncated,  # True if episode truncated (out of bounds or time limit)
                 "finished_at": time.time(),  
             })
@@ -369,12 +334,11 @@ class SectorEnv(MultiAgentEnv):
        
         self.agents = [agent for agent in self.agents if agent not in agents_to_remove]
         
-        # End episode when 1 or fewer agents remain
-        # End episode when 1 or fewer agents remain
-        all_done = len(self.agents) <= 1
-        terminateds["__all__"] = all_done
-        truncateds["__all__"] = all_done
+        # Set __all__ to False (episode continues until no agents remain)
+        terminateds["__all__"] = len(self.agents) == 0
+        truncateds["__all__"] = len(self.agents) == 0
         
+        # Flush buffers and write stats when all agents are done
         if len(self.agents) == 0:
             # optional: print a compact obs stats summary for this run so far
             if self._print_obs_stats_per_episode:
@@ -386,132 +350,9 @@ class SectorEnv(MultiAgentEnv):
                 print(f"[obs-stats] failed to write CSV at episode end: {e}")
             for a in agents_to_remove:
                 self._flush_agent_buffer(a)
-            
+        
         return observations, rewards, terminateds, truncateds, infos
 
-    def _calculate_mvp_action(self, agent_id):
-        """
-        Retrieves state and asks the MVP solver for the perfect move.
-        Returns a 2D action suitable for the action space.
-        """
-        # Initialize debug counter
-        if not hasattr(self, '_mvp_debug_count'):
-            self._mvp_debug_count = 0
-        self._mvp_debug_count += 1
-        
-        try:
-            # 1. Get Own State from BlueSky traffic arrays
-            ac_idx = bs.traf.id2idx(agent_id)
-            
-            # Get position in meters relative to center
-            ac_lat = bs.traf.lat[ac_idx]
-            ac_lon = bs.traf.lon[ac_idx]
-            own_pos = fn.latlong_to_nm(self.center, np.array([ac_lat, ac_lon])) * NM2KM * 1000
-            
-            # Get velocity in m/s
-            ac_hdg = bs.traf.hdg[ac_idx]
-            ac_gs = bs.traf.gs[ac_idx]  # ground speed in m/s
-            vx = np.cos(np.deg2rad(ac_hdg)) * ac_gs
-            vy = np.sin(np.deg2rad(ac_hdg)) * ac_gs
-            own_vel = np.array([vx, vy])
-            
-            # 2. Calculate the Goal Vector (Preferred Velocity)
-            # This is where we WANT to go if there are no obstacles
-            wpt_lat, wpt_lon = self.agent_waypoints[agent_id]
-            goal_pos = fn.latlong_to_nm(self.center, np.array([wpt_lat, wpt_lon])) * NM2KM * 1000
-            direction_to_goal = goal_pos - own_pos
-            dist_to_goal = np.linalg.norm(direction_to_goal)
-            
-            # Normalize and scale to current speed (maintain energy)
-            current_speed = np.linalg.norm(own_vel)
-            if dist_to_goal > 0 and current_speed > 0:
-                preferred_vel = (direction_to_goal / dist_to_goal) * current_speed
-            else:
-                preferred_vel = own_vel  # Keep current velocity if at goal
-            
-            # 3. Get Neighbors State from BlueSky traffic
-            neighbors_data = []
-            for other_id in self.agents:
-                if other_id == agent_id:
-                    continue
-                
-                other_idx = bs.traf.id2idx(other_id)
-                if other_idx < 0:  # Invalid index
-                    continue
-                
-                # Get other agent position
-                other_lat = bs.traf.lat[other_idx]
-                other_lon = bs.traf.lon[other_idx]
-                other_pos = fn.latlong_to_nm(self.center, np.array([other_lat, other_lon])) * NM2KM * 1000
-                
-                # Check distance first to save CPU (only care if within lookahead range)
-                dist = np.linalg.norm(other_pos - own_pos)
-                if dist > 500.0:  # 500m radius
-                    continue
-                
-                # Get other agent velocity
-                other_hdg = bs.traf.hdg[other_idx]
-                other_gs = bs.traf.gs[other_idx]
-                other_vx = np.cos(np.deg2rad(other_hdg)) * other_gs
-                other_vy = np.sin(np.deg2rad(other_hdg)) * other_gs
-                
-                neighbors_data.append({
-                    'pos': other_pos,
-                    'vel': np.array([other_vx, other_vy])
-                })
-            
-            # 4. Calculate MVP avoidance velocity
-            # This returns the SAFE VELOCITY (e.g. [1.2, -0.5])
-            safe_velocity = self.mvp_solver.calculate_avoidance_velocity(
-                own_pos, own_vel, neighbors_data
-            )
-            
-            # 5. CRITICAL CHECK: Did MVP change anything?
-            # If MVP output is identical to current input velocity (meaning no conflict),
-            # we switch to the Preferred Velocity so the drone learns to move to goal.
-            if np.allclose(safe_velocity, own_vel, atol=1e-3):
-                target_vel = preferred_vel
-                conflict_detected = False
-            else:
-                target_vel = safe_velocity
-                conflict_detected = True
-            
-            # 6. Convert velocity to normalized action space [-1, 1]
-            # Action space expects [heading_change, speed_change] in normalized form
-            # For simplicity, we'll convert velocity to heading and speed deltas
-            
-            # Calculate target heading and speed
-            target_speed = np.linalg.norm(target_vel)
-            if target_speed > 0:
-                target_heading_rad = np.arctan2(target_vel[1], target_vel[0])
-                target_heading_deg = np.rad2deg(target_heading_rad)
-            else:
-                target_heading_deg = ac_hdg
-            
-            # Calculate heading difference
-            heading_diff = fn.bound_angle_positive_negative_180(target_heading_deg - ac_hdg)
-            
-            # Calculate speed difference in knots
-            current_speed_kts = ac_gs * MpS2Kt
-            target_speed_kts = target_speed * MpS2Kt
-            speed_diff = target_speed_kts - current_speed_kts
-            
-            # Normalize to action space [-1, 1]
-            # Heading: normalize by D_HEADING (45 degrees)
-            action_heading = np.clip(heading_diff / D_HEADING, -1.0, 1.0)
-            
-            # Speed: normalize by D_VELOCITY (10/3 knots)
-            action_speed = np.clip(speed_diff / D_VELOCITY, -1.0, 1.0)
-            
-            action = np.array([action_heading, action_speed], dtype=np.float32)
-            
-            return action
-            
-        except Exception as e:
-            # If anything fails, return neutral action
-            return np.array([0.0, 0.0], dtype=np.float32)
-    
-        
     def _maybe_print_observations(self, observations, when="step"):
         """Optionally print full observation vectors for inspection.
         Controls:
@@ -568,6 +409,7 @@ class SectorEnv(MultiAgentEnv):
                     "sum_reward_proximity",
                     "total_intrusions",
                     "terminated_waypoint",   # True if agent reached waypoint
+                    "terminated_collision",  # True if agent collided with another aircraft
                     "truncated",             # True if truncated (out of bounds/time limit)
                     "finished_at",
                 ],
@@ -660,9 +502,6 @@ class SectorEnv(MultiAgentEnv):
         coords = [((self.window_width / 2) + p[0] * NM2KM * px_per_km, (self.window_height / 2) - p[1] * NM2KM * px_per_km) for p in self.poly_points]
         pygame.draw.polygon(canvas, (255, 0, 0), coords, width=2)
 
-        # Get risk levels and most risky neighbor info
-        # _, risk_levels, most_risky = self._get_observation(self.agents)
-
         # Precompute positions for all agents
         agent_positions = {}
         for agent in self.agents:
@@ -675,29 +514,7 @@ class SectorEnv(MultiAgentEnv):
             except Exception:
                 continue
 
-        # Draw lines to the top 3 most risky neighbors for agent 'KL001'
-        # Use pre-computed most_risky data instead of recalculating
-        # agent1 = 'KL001'
-        # if agent1 in most_risky and agent1 in agent_positions:
-        #     # Get the top 3 risky neighbors from the sorted risk_levels
-        #     try:
-        #         # Sort all other agents by risk level
-        #         other_agents = [(agent, risk_levels.get(agent, 0.0)) 
-        #                        for agent in self.agents if agent != agent1]
-        #         other_agents.sort(key=lambda x: -x[1])
-        #         top3 = [(agent, risk) for agent, risk in other_agents[:4] 
-        #                 if agent in agent_positions]
-                
-        #         line_colors = [(255,0,0), (255,140,0), (255,255,0)]  # red, orange, yellow
-        #         for idx, (neighbor_id, _) in enumerate(top3):
-        #             start = agent_positions[agent1]
-        #             end = agent_positions[neighbor_id]
-        #             color = line_colors[idx] if idx < len(line_colors) else (128,128,128)
-        #             pygame.draw.line(canvas, color, start, end, width=2)
-        #     except Exception:
-        #         pass
-
-        # Draw aircraft, color by risk, and display agent ID and risk value
+        # Draw aircraft, color by risk, and display attention weight
         font = pygame.font.SysFont(None, 18)
         for agent in self.agents:
             try:
@@ -706,12 +523,10 @@ class SectorEnv(MultiAgentEnv):
                 pos = agent_positions.get(agent, None)
                 if pos is None:
                     continue
-                # risk_val = risk_levels.get(agent, 0.0)
-                # Color: green for KL001, others red scaled by risk
-                if agent == "KL001":
+                # Color: green for first agent in list, red for others
+                if agent == self.agents[0]:
                     color = (0, 255, 0)
                 else:
-                    # red_intensity = int(100 + 155 * min(1.0, risk_val))
                     color = (200, 0, 0)
                 # Draw heading line
                 heading_end_x = np.cos(np.deg2rad(ac_hdg)) * 10
@@ -719,17 +534,15 @@ class SectorEnv(MultiAgentEnv):
                 pygame.draw.line(canvas, (0, 0, 0), pos, (pos[0] + heading_end_x, pos[1] - heading_end_y), width=4)
                 # Draw aircraft circle
                 pygame.draw.circle(canvas, color, (int(pos[0]), int(pos[1])), int(INTRUSION_DISTANCE * NM2KM * px_per_km / 2), width=2)
-                # Draw agent ID above aircraft
-                id_text = agent
-                id_surf = font.render(id_text, True, (255, 255, 255))  # White text
-                # Add black background for better visibility
-                text_rect = id_surf.get_rect(center=(pos[0], pos[1] - 20))
-                pygame.draw.rect(canvas, (0, 0, 0), text_rect.inflate(4, 2))
-                canvas.blit(id_surf, text_rect)
-                # Draw risk value below aircraft
-                # risk_text = f"{risk_val:.2f}"
-                # text_surf = font.render(risk_text, True, (0, 0, 0))
-                # canvas.blit(text_surf, (pos[0] + 8, pos[1] + 8))
+                # Draw agent ID and attention weight as text
+                if agent in self.attention_weights:
+                    alpha_val = self.attention_weights[agent]
+                    alpha_text = f"{agent} : {alpha_val:.3f}"
+                else:
+                    # Show agent ID even if no attention weight available
+                    alpha_text = f"{agent}"
+                text_surf = font.render(alpha_text, True, (0, 0, 0))
+                canvas.blit(text_surf, (pos[0] + 8, pos[1] - 8))
             except Exception:
                 continue
 
@@ -753,444 +566,245 @@ class SectorEnv(MultiAgentEnv):
             self.window = None
             
     
-    # def _cpa_risk(self, dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
-    #         k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2):
-    #     EPS = 1e-6  # to avoid div by zero
-        
-    #     # ORIGINAL parameters 
-    #     # _cpa_risk(dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
-    #     #     k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2
-        
-    #     # k controls the distance/sigmoid term (how  much closeness contributes to final risk)
-    #     #   - LOWER k = steeper sigmoid = risk drops off faster with distance = focus on closer agents
-    #     # w_d controls the distance factor (how much distance contributes to final risk)
-    #     # w_t controls the time factor (how much time contributes to final risk), soon vs later
-    #     # w_c controls the closing speed factor (how much closing speed contributes to final risk)
-    #     # distance_factor controls how much to penalize distant threats
-    #     #   - HIGHER distance_factor = more penalty on distant agents = focus on closer agents
-    #     diverge_penalty = 0.1  # was 0.1, reduced to further penalize diverging aircraft
-    #     hit_scale = 0.7  # was 0.7, reduced to prevent saturation
-    #     w_d = 0.8  # was 1.2, reduced to prevent saturation (theoretical max now ~1.6)
-    #     w_t = 0.1
-    #     w_c = 0.1
-    #     k = 0.15  # was 0.2, DECREASED to make sigmoid steeper -> focus on closer agents
-    #     distance_factor = 0.15  # was 0.15, INCREASED to penalize distant threats more -> focus on closer agents 
-
-    #     # Step 0: Early exit for distant aircraft (>400m) - no risk calculation needed
-    #     r2 = dx * dx + dy * dy  # relative distance squared
-    #     current_distance = float(np.sqrt(r2))  # current separation in meters
-    #     if current_distance > 600.0:  # Ignore aircraft more than 400m away
-    #         # print when this happens
-    #         # print("----------------------------------------")
-    #         # print(f"[RISK] Skipping risk calc for distant aircraft at {current_distance:.1f} m")
-    #         return 0.0
-        
-    #     # Step 1: Compute relative position and velocity
-    #     rv = dx * dvx + dy * dvy  # relative position dot relative velocity
-    #     v2 = dvx * dvx + dvy * dvy  # relative speed squared
-        
-    #     # If diverging (rv >= 0) and far away (>300m), no risk
-    #     if rv >= EPS and 600.0 >= current_distance:
-    #         return 0.0  # moving apart and far enough, no risk
-        
-    #     if rv < EPS and current_distance < 300.0:
-    #         return 1.01  # imminent collision course, max risk
-    #     # r = np.sqrt(r2)  # relative distance
-    #     # print r 
-    #     # print(r)
-
-    #     # Step 2: Handle case with no relative motion (v2 < EPS)
-    #     if v2 < EPS:
-    #         t_cpa = 0.0  # no CPA
-    #         d_cpa = float(np.hypot(dx, dy))  # Euclidean distance
-    #         approaching = False  # not moving toward each other
-    #         speed_mag = 0.0  # no relative speed
-    #     else:
-    #         speed_mag = float(np.sqrt(v2))  # speed magnitude
-    #         t_cpa = -rv / v2  # time to CPA
-    #         t_cpa = float(np.clip(t_cpa, 0.0, T))  # clip to [0, T]
-    #         d_cpa = float(np.hypot(dx + dvx * t_cpa, dy + dvy * t_cpa))  # distance at CPA
-    #         approaching = (rv < 0.0)  # moving toward each other
-
-    #     # Step 3: Calculate the time urgency factor (0 at horizon, 1 now)
-    #     time_factor = 1.0 - (t_cpa / (T + EPS))
-
-    #     # Step 4: Distance factor using a sigmoid function centered at R (protected zone)
-    #     soft = max(EPS, k * R)  # avoid div-by-zero
-    #     dist_factor = 1.0 / (1.0 + np.exp((d_cpa - R) / soft))  # smooth sigmoid decay for distance
-
-    #     # Step 5: Closing speed factor (normalized), only counts if approaching
-    #     if r2 < EPS or v2 < EPS:
-    #         closing_norm = 0.0
-    #     else:
-    #         closing_speed = max(0.0, -rv / (np.sqrt(r2) + EPS))  # m/s toward each other
-    #         closing_norm = closing_speed / (speed_mag + EPS)  # normalize to ~0..1
-
-    #     # Step 6: True collision check (optional, solve the quadratic for potential collision)
-    #     hit_bonus = 0.0
-    #     if v2 >= EPS:
-    #         a = v2
-    #         b = 2.0 * rv
-    #         c = r2 - R * R
-    #         disc = b * b - 4 * a * c
-    #         if disc >= 0.0:
-    #             s = float(np.sqrt(disc))
-    #             t1 = (-b - s) / (2 * a)
-    #             t2 = (-b + s) / (2 * a)
-    #             # first future intersection within horizon (if any)
-    #             candidates = [t for t in (t1, t2) if 0.0 <= t <= T]
-    #             if candidates:
-    #                 t_hit = min(candidates)
-    #                 # bonus scales with how soon the hit occurs
-    #                 hit_bonus = hit_scale * (1.0 - t_hit / (T + EPS))  # 0..0.2
-
-    #     # Step 7: Distance penalty - closer agents get a higher penalty
-    #     current_distance = float(np.sqrt(r2))  # current separation distance
-    #     distance_penalty = min(1.0, current_distance / (2 * R))  # 0 at contact, 1 at 4*R+
-
-    #     # Step 8: Combine the factors (weighted sum)
-    #     risk = (w_d * float(dist_factor)
-    #             + w_t * float(time_factor)
-    #             + w_c * float(closing_norm)
-    #             + float(hit_bonus))
-
-    #     # Step 9: Apply the distance penalty - closer threats have higher priority
-    #     risk *= (1.0 - distance_factor * distance_penalty)  # reduce risk for distant threats
-        
-    #     # Step 10: Penalize if agents are diverging (moving away from each other)
-    #     if not approaching:
-    #         risk *= diverge_penalty  # down-weight if moving apart
-
-    #     # Step 10.5: Track and print maximum uncapped risk value
-    #     uncapped_risk = float(max(0.0, risk))
-    #     if uncapped_risk > self.max_risk_uncapped:
-    #         self.max_risk_uncapped = uncapped_risk
-    #         print(f"[RISK] New maximum uncapped risk: {self.max_risk_uncapped:.6f}")
-
-    #     # Step 11: Clamp risk to [0, 1]
-    #     final_risk = float(max(0.0, min(1.0, risk)))
-    #     return final_risk  # Return the clamped risk value between 0 and 1
-    # def _cpa_risk(self, dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S):
-    #     """
-    #     Calculates risk based on Time to Closest Approach (tau) + specific collision bonus.
-        
-    #     Args:
-    #         R: Radius of the protected zone (e.g., 5-10 meters). NOT the lookahead distance.
-    #         T: Time horizon to look ahead (seconds).
-    #     """
-    #     # Constants
-    #     LOOKAHEAD_DIST = 600.0  # Max distance to even consider a target
-    #     HIT_SCALE = 0.5         # How much extra risk to add for a confirmed collision course
-    #     EPS = 1e-6
-
-    #     # 1. Kinematics Setup
-    #     r2 = dx * dx + dy * dy
-    #     current_dist = np.sqrt(r2)
-    #     v2 = dvx * dvx + dvy * dvy
-    #     rv = dx * dvx + dy * dvy
-
-    #     # 2. Early Exits
-    #     # If too far away, ignore completely
-    #     if current_dist > LOOKAHEAD_DIST:
-    #         return 0.0
-        
-    #     # If moving apart (rv >= 0), risk is low unless extremely close
-    #     if rv >= 0:
-    #         return 0.1 if current_dist < 500.0 else 0.0
-
-    #     # ---------------------------------------------------------
-    #     # PART A: BASE RISK (Tau-based / TCAS-style)
-    #     # ---------------------------------------------------------
-    #     # Calculate Time to Closest Approach (tau)
-    #     # Formula: tau = -(r . v) / (v . v)
-    #     if v2 < EPS:
-    #         tau = float('inf')
-    #     else:
-    #         tau = -rv / (v2 + EPS)
-        
-    #     # Base risk calculation
-    #     if tau < 0 or tau > T:
-    #         base_risk = 0.0
-    #     else:
-    #         # Linear decay: 1.0 if tau=0 (now), 0.0 if tau=T (horizon)
-    #         base_risk = (T - tau) / T
-        
-    #     # Scale by proximity (closer = scarier)
-    #     proximity_scale = 1.0 if current_dist < 500.0 else 500.0 / (current_dist + EPS)
-    #     risk = base_risk * proximity_scale
-
-    #     # ---------------------------------------------------------
-    #     # PART B: HIT BONUS (Quadratic Collision Check)
-    #     # ---------------------------------------------------------
-    #     # Solves |P + V*t| = R for t. Finds exact time we enter the protected zone R.
-    #     hit_bonus = 0.0
-        
-    #     if v2 >= EPS:
-    #         a = v2
-    #         b = 2.0 * rv
-    #         c = r2 - ((1.25*R) * (1.25*R)) # Uses the small protected zone radius R
-            
-    #         disc = b * b - 4 * a * c
-            
-    #         # If discriminant >= 0, a collision path exists
-    #         if disc >= 0.0:
-    #             s = np.sqrt(disc)
-    #             t1 = (-b - s) / (2 * a)
-    #             t2 = (-b + s) / (2 * a)
-                
-    #             # Check if either intersection happens within our time horizon [0, T]
-    #             candidates = [t for t in (t1, t2) if 0.0 <= t <= T]
-                
-    #             if candidates:
-    #                 t_hit = min(candidates)
-    #                 # Add bonus: 0.5 extra risk if hit is immediate, 0.0 if hit is at T
-    #                 hit_bonus = HIT_SCALE * (1.0 - t_hit / (T + EPS))
-
-    #     # ---------------------------------------------------------
-    #     # PART C: COMBINE
-    #     # ---------------------------------------------------------
-    #     total_risk = risk + hit_bonus
-        
-    #     uncapped_risk = float(max(0.0, total_risk))
-    #     if uncapped_risk > self.max_risk_uncapped:
-    #         self.max_risk_uncapped = uncapped_risk
-    #         print(f"[RISK] New maximum uncapped risk: {self.max_risk_uncapped:.6f}")
-        
-    #     return float(np.clip(total_risk, 0.0, 1.0))
-    def _cpa_risk(dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S, 
-            k=0.25, w_d=0.8, w_t=0.1, w_c=0.1, diverge_penalty=0.2):
+    @staticmethod
+    def _calculate_conflict_metrics(dx, dy, dvx, dvy, R=PROTECTED_ZONE_M, T=CPA_TIME_HORIZON_S):
         """
-        Calculate collision risk based on Closest Point of Approach (CPA).
+        Calculate conflict detection metrics: tcpa, dcpa, and tLOS.
+        Based on BlueSky's conflict detection logic (detection.py).
         
-        Returns a risk value between 0.0 (no threat) and 1.0 (imminent collision).
-        Only considers APPROACHING aircraft within the time horizon.
+        Args:
+            dx, dy: Relative position (m) - position of intruder relative to ownship
+            dvx, dvy: Relative velocity (m/s) - velocity of ownship minus intruder
+            R: Protected zone radius (m)
+            T: Time horizon for conflict detection (s)
+            
+        Returns:
+            tcpa: Time to closest point of approach (s)
+            dcpa: Distance at closest point of approach (m)
+            tLOS: Time to loss of separation (s), or np.inf if no conflict
         """
         EPS = 1e-6
         
-        # time horizon parameter
-        T = 20.0  # put to 20 seconds
-        min_length = 750.0 #put to 750.meters
+        # Current distance and relative velocity squared
+        dist = np.sqrt(dx * dx + dy * dy)
+        dv2 = dvx * dvx + dvy * dvy
+        dv2 = max(dv2, EPS)  # Limit lower absolute value (BlueSky uses 1e-6)
+        vrel = np.sqrt(dv2)
         
-        # Step 1: Basic calculations
-        rv = dx * dvx + dy * dvy  # dot product: <0 if approaching, >0 if diverging
-        v2 = dvx * dvx + dvy * dvy  # relative speed squared
-        r2 = dx * dx + dy * dy  # current distance squared
-        current_distance = float(np.sqrt(r2))
+        # Calculate time to CPA (BlueSky method)
+        # tcpa = -(du * dx + dv * dy) / dv2
+        tcpa = -(dvx * dx + dvy * dy) / dv2
         
-        # Step 2: Early exit if not moving or diverging (moving apart/parallel)
-        # This is the most important filter - only care about approaching aircraft
-        if v2 < EPS or rv >= -EPS:  # rv >= 0 means diverging
-            return 0.0
+        # Calculate distance at CPA (BlueSky method)
+        # dcpa2 = abs(dist^2 - tcpa^2 * dv2)
+        dcpa2 = abs(dist * dist - tcpa * tcpa * dv2)
+        dcpa = float(np.sqrt(dcpa2))
         
-        # Step 3: Calculate time to CPA (only valid for approaching aircraft)
-        speed_mag = float(np.sqrt(v2))
-        t_cpa = -rv / v2  # Will be positive since rv < 0
+        # Check for horizontal conflict
+        R2 = R * R
+        swhorconf = dcpa2 < R2
         
-        # Step 4: Early exit if CPA is beyond time horizon or in the past
-        if t_cpa < 0.0 or t_cpa > T:
-            return 0.0
+        if not swhorconf:
+            # No conflict predicted
+            tLOS = np.inf
+        else:
+            # Calculate times of entering conflict zone (BlueSky method)
+            # dxinhor = sqrt(R^2 - dcpa^2) is half the distance traveled inside zone
+            dxinhor = np.sqrt(max(0.0, R2 - dcpa2))
+            dtinhor = dxinhor / vrel
+            
+            # Entry time into conflict zone
+            tinhor = tcpa - dtinhor
+            
+            # Check if entry time is positive and within lookahead
+            if tinhor > 0.0 and tinhor < T:
+                tLOS = tinhor
+            elif dist < R:
+                # Already in conflict
+                tLOS = 0.0
+            else:
+                # Conflict outside time horizon or in past
+                tLOS = np.inf
         
-        # Step 5: Calculate distance at CPA
-        d_cpa = float(np.hypot(dx + dvx * t_cpa, dy + dvy * t_cpa))
+        return tcpa, dcpa, tLOS
+    
+    @staticmethod
+    def _calculate_risk_score(dcpa, tLOS, T=CPA_TIME_HORIZON_S, R=PROTECTED_ZONE_M):
+        """
+        Calculate a risk score based on conflict metrics.
+        Higher score = higher risk/priority.
         
-        # Step 6: Early exit if CPA distance is very safe (beyond 5x protected zone)
-        if d_cpa > min_length:  # > 500m at closest point - no threat
-            return 0.0
+        Only aircraft with actual conflicts (tLOS < inf) receive a risk score.
+        Non-conflict aircraft are filtered out before this function is called.
         
-        # Step 7: Calculate risk components for potential threats
+        Risk scoring logic:
+        - Time urgency: How soon the conflict occurs (smaller tLOS = higher risk)
+        - Severity: How close the CPA is (smaller dcpa = higher risk)
         
-        # Time urgency: 1.0 when CPA is now, 0.0 when CPA is at horizon
-        # More urgent when CPA happens sooner
-        time_urgency = 1.0 - (t_cpa / T)
+        Note: Risk is only used for sorting, not as NN input, so no clipping needed.
         
-        # Distance threat: How close will they get?
-        # 1.0 when d_cpa = 0 (collision), decays smoothly toward 0 at 5*R
-        # Using sigmoid centered at R with width 0.4*R for smooth transition
-        distance_threat = 1.0 / (1.0 + np.exp((d_cpa - R) / (0.4 * R)))
+        Args:
+            dcpa: Distance at closest point of approach (m)
+            tLOS: Time to loss of separation (s)
+            T: Time horizon (s)
+            R: Protected zone radius (m)
+            
+        Returns:
+            risk: Risk score (higher = more urgent conflict)
+        """
+        EPS = 1e-9
         
-        # Closing speed factor: How fast are they converging?
-        # Normalized to typical speeds (20 m/s ~= 40 knots)
-        closing_speed = -rv / (current_distance + EPS)  # m/s toward each other
-        closing_factor = float(np.clip(closing_speed / 30.0, 0.0, 1.0))
+        # Time urgency: sooner conflicts are more urgent
+        # tLOS=0 gives 1.0, tLOS=T gives ~0
+        time_urgency = 1.0 - (tLOS / (T + EPS))
         
-        # Current distance factor: Prioritize threats that are already close
-        # Scale from 1.0 (at protected zone) to 0.0 (at 5*R)
-        proximity_factor = 1.0 - float(np.clip((current_distance - R) / (4.0 * R), 0.0, 1.0))
+        # Severity: how close will they get
+        # dcpa=0 gives 1.0, dcpa=R gives 0.5, dcpa>R decreases
+        severity = 1.0 / (1.0 + (dcpa / (R * 0.5 + EPS)))
         
-        # Step 8: Combine factors with weights
-        # Distance threat is most important (50%)
-        # Time urgency is second (25%) 
-        # Current proximity is third (15%)
-        # Closing speed is fourth (10%)
-        risk = (0.50 * distance_threat + 
-                0.25 * time_urgency + 
-                0.15 * proximity_factor +
-                0.10 * closing_factor)
+        # Combine: 60% time urgency, 40% severity
+        # This means imminent conflicts get highest priority
+        risk = 0.6 * time_urgency + 0.4 * severity
         
-        return float(np.clip(risk, 0.0, 1.0))
+        return float(risk)
 
-
-
+            
+    # old get_obs
     # def _get_observation(self, active_agents):
-    #     dim = 3 + 8 * NUM_AC_STATE
+    #     # code that builds the observation vector. 
+        
+    #     # origin reference for absolute positions
+    #     y_origin = self.center[0]
+    #     x_origin = self.center[1]
+        
+    #     # observation vector
+    #     # 7 ownship features + 5 features per intruder (distance, dx_rel, dy_rel, vx_rel, vy_rel)
+    #     dim = 7 + 5 * NUM_AC_STATE
     #     obs = {}
-    #     risk_levels = {}
-    #     most_risky = {}  # agent_id: (most_risky_other_agent_id, risk_value)
 
     #     if not hasattr(self, "_obs_errors"):
     #         self._obs_errors = {}
-
-    #     def note(agent, msg):
-    #         c = self._obs_errors.get(agent, 0) + 1
-    #         self._obs_errors[agent] = c
-    #         if c % LOG_EVERY_N == 1:
-    #             print(f"[OBS-WARN] {agent}: {msg} (count={c})")
 
     #     for agent in active_agents:
     #         try:
     #             ac_idx = bs.traf.id2idx(agent)
 
-    #             # feature computations 
+    #             # --- 1. Ownship Features ---
     #             wpt_lat, wpt_lon = self.agent_waypoints[agent]
     #             wpt_qdr, _ = bs.tools.geo.kwikqdrdist(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], wpt_lat, wpt_lon)
     #             ac_hdg = bs.traf.hdg[ac_idx]
     #             drift = fn.bound_angle_positive_negative_180(ac_hdg - wpt_qdr)
-    #             # if agent == "KL001":
-    #             #     print(f"agent={agent}, drift = {drift}") 
+                
     #             cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
-    #             airspeed_kts = bs.traf.tas[ac_idx] * MpS2Kt
+    #             airspeed = bs.traf.tas[ac_idx] / 18 # normalize on to a max of 18 m/s (~35 kt)
                 
-    #             # Convert aviation heading (0°=North) to velocity components
-    #             # vx = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  # East component
-    #             # vy = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  # North component
-    #             vy = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  # East component
-    #             vx = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  # North component
+    #             # location
+    #             dx = (bs.traf.lon[ac_idx] - x_origin) / MAX_LAT_LON # normalized  difference in longitude TODO dit misschien nog * 100 doen ofzo om wat zwaarder mee te laten tellen?
+    #             dy = (bs.traf.lat[ac_idx] - y_origin) / MAX_LAT_LON # difference in latitude
                 
-    #             ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
+    #             # velocity
+    #             vx = (np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  / 18 # normalize on to a max of 18 m/s (~35 kt)
+    #             vy = (np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  ) / 18 # normalize on to a max of 18 m/s (~35 kt)
+    #             # ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
+                
+    #             # maybe for determining the relative position of other ac
+    #             # own_lat = bs.traf.lat[ac_idx]
+    #             # own_lon = bs.traf.lon[ac_idx]
+    #             # own_gs = bs.traf.gs[ac_idx]
+    #             # own_hdg = bs.traf.hdg[ac_idx]
 
-    #             # Build candidate list with CPA risk, and keep track of agent ids
+    #             # --- 2. Build Candidate List (in index order, no sorting) ---
     #             candidates = []
-    #             for i in range(self.num_ac):
-    #                 if i == ac_idx:
+    #             # Get current agent ID to index mapping
+    #             agent_id_to_idx = {agent_id: idx for idx, agent_id in enumerate(self.agents)}
+                
+    #             for other_agent_id in self.agents:
+    #                 if other_agent_id == agent:
     #                     continue
-    #                 other_agent_id = self.agents[i] if i < len(self.agents) else None
+                    
+    #                 # Skip if we can't find the waypoint
+    #                 if other_agent_id not in self.agent_waypoints:
+    #                     continue
+                    
+    #                 # Get the BlueSky index for this agent
+    #                 i = agent_id_to_idx[other_agent_id]
+                    
+    #                 # Calculate absolute positions
+    #                 dxi_abs = (bs.traf.lon[i] - x_origin) / MAX_LAT_LON
+    #                 dyi_abs = (bs.traf.lat[i] - y_origin) / MAX_LAT_LON
+                    
+    #                 # Calculate absolute velocities
     #                 int_hdg = bs.traf.hdg[i]
-    #                 int_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[i], bs.traf.lon[i]])) * NM2KM * 1000
-    #                 dx = float(int_loc[0] - ac_loc[0])
-    #                 dy = float(int_loc[1] - ac_loc[1])
+    #                 vxi_abs = (np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]) / 18
+    #                 vyi_abs = (np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]) / 18
                     
-    #                 # flipped for the cpa risk
-    #                 # Convert aviation heading (0°=North) to velocity components
-    #                 # vxi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]  # East component
-    #                 vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]  # East component
+    #                 # Make positions and velocities RELATIVE to ownship
+    #                 dx_rel = dxi_abs - dx  # intruder x - ownship x
+    #                 dy_rel = dyi_abs - dy  # intruder y - ownship y
+    #                 vx_rel = vxi_abs - vx  # intruder vx - ownship vx
+    #                 vy_rel = vyi_abs - vy  # intruder vy - ownship vy
+                    
+    #                 # Calculate distance between ownship and intruder (in nautical miles)
+    #                 _, distance_nm = bs.tools.geo.kwikqdrdist(
+    #                     bs.traf.lat[ac_idx], bs.traf.lon[ac_idx],
+    #                     bs.traf.lat[i], bs.traf.lon[i]
+    #                 )
+    #                 # Normalize distance (typical max ~1 NM in this scenario)
+    #                 distance_normalized = float(distance_nm)
+                    
+    #                 # Store (distance, dx_rel, dy_rel, vx_rel, vy_rel, agent_id)
+    #                 candidates.append((distance_normalized, dx_rel, dy_rel, vx_rel, vy_rel, other_agent_id))
 
-    #                 # vyi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]  # North component
-    #                 vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
-                    
-    #                 dvx = float(vxi - vx)
-    #                 dvy = float(vyi - vy)
-                    
-    #                 # Calculate dot product to determine approaching/diverging
-    #                 # rv = dx * dvx + dy * dvy  # dot product
-                    
-    #                 # # Debug output for KL001 with detailed breakdown
-    #                 # if agent == "KL001" and other_agent_id is not None:
-    #                 #     # d_now = float(np.hypot(dx, dy))
-                        
-    #                 #     # # Show detailed breakdown
-    #                 #     print(f"\n[DEBUG] KL001 vs {other_agent_id}:")
-    #                 #     # print(f"  Position: dx={dx:.1f}m, dy={dy:.1f}m, dist={d_now:.1f}m")
-    #                 #     # print(f"  KL001 vel: vx={vx:.2f}, vy={vy:.2f} m/s (hdg={ac_hdg:.1f}°)")
-    #                 #     # print(f"  {other_agent_id} vel: vxi={vxi:.2f}, vyi={vyi:.2f} m/s (hdg={int_hdg:.1f}°)")
-    #                 #     # print(f"  Relative vel: dvx={dvx:.2f}, dvy={dvy:.2f} m/s")
-    #                 #     # print(f"  Dot product rv = ({dx:.1f} * {dvx:.2f}) + ({dy:.1f} * {dvy:.2f}) = {rv:.1f}")
-                        
-    #                 #     if rv < 0:
-    #                 #         print(f"  → {other_agent_id} is APPROACHING KL001 (rv={rv:.1f} < 0)")
-    #                 #     else:
-    #                 #         print(f"  → {other_agent_id} is DIVERGING from KL001 (rv={rv:.1f} > 0)")
-                    
-    #                 trk = np.arctan2(dvy, dvx)
-    #                 d_now = float(np.hypot(dx, dy))
-    #                 risk = self._cpa_risk(dx, dy, dvx, dvy)
-    #                 candidates.append((risk, dx, dy, dvx, dvy, np.cos(trk), np.sin(trk), d_now, other_agent_id))
-
-    #             # Sort by descending risk; break ties by current distance (closer first)
-    #             candidates.sort(key=lambda t: (-t[0], t[7]))
+    #             # Sort by distance (closest first) and take top NUM_AC_STATE neighbors
+    #             candidates.sort(key=lambda x: x[0])
     #             top = candidates[:NUM_AC_STATE]
+                    
+    #             # Store neighbor mapping for attention visualization (neighbor IDs sorted by distance)
+    #             self.neighbor_mapping[agent] = [c[5] for c in top if c[5] is not None]
 
-    #             # Find the most risky other agent
-    #             if candidates:
-    #                 most_risk, *_, most_risky_id = candidates[0]
-    #                 most_risky[agent] = (most_risky_id, most_risk)
-    #                 risk_levels[agent] = most_risk
-    #             else:
-    #                 most_risky[agent] = (None, 0.0)
-    #                 risk_levels[agent] = 0.0
+    #             # --- 3. Construct Vector ---
+    #             # We iterate through neighbors and append ALL features for that neighbor sequentially.
+    #             # This creates [Ownship, Agent1(5 features), Agent2(5 features), ...]
+    #             # Agents are sorted by distance (closest first)
+                
+    #             intruder_features = []
+    #             for i in range(NUM_AC_STATE):
+    #                 if i < len(top):
+    #                     # Extract features from tuple
+    #                     t = top[i]
+    #                     # Indices: 0=distance, 1=dx_rel, 2=dy_rel, 3=vx_rel, 4=vy_rel, 5=id
+    #                     distance, dx_rel, dy_rel, vx_rel, vy_rel = t[0], t[1], t[2], t[3], t[4]
+                        
+    #                     # Append 5 features for this intruder
+    #                     intruder_features.extend([distance, dx_rel, dy_rel, vx_rel, vy_rel])
+    #                 else:
+    #                     # Padding (5 zeros per missing agent)
+    #                     intruder_features.extend([0.0] * 5)
 
-    #             # Unpack top-N into arrays
-    #             risk       = [t[0] for t in top]
-    #             x_r        = [t[1] for t in top]
-    #             y_r        = [t[2] for t in top]
-    #             vx_r       = [t[3] for t in top]
-    #             vy_r       = [t[4] for t in top]
-    #             cos_track  = [t[5] for t in top]
-    #             sin_track  = [t[6] for t in top]
-    #             distances  = [t[7] for t in top]
+    #             # Concatenate Ownship + Intruders
+    #             ownship_feats = np.array([cos_drift, sin_drift, airspeed, dx, dy, vx, vy], dtype=np.float32)
+    #             intruder_feats = np.array(intruder_features, dtype=np.float32)
+                
+    #             vec = np.concatenate([ownship_feats, intruder_feats])
 
-    #             # Normalization WITHOUT clipping; we will track min/max/mean to tune scales later
-    #             airspeed_norm = (airspeed_kts - AIRSPEED_CENTER_KTS) / AIRSPEED_SCALE_KTS
+    #             # Sanitize and shape-check
+    #             # if not np.isfinite(vec).all():
+    #             #     vec = np.nan_to_num(vec, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
 
-    #             risk_arr = np.array(risk, dtype=float)
-    #             x_rn = np.array(x_r, dtype=float) / MAX_SCENARIO_DIM_M
-    #             y_rn = np.array(y_r, dtype=float) / MAX_SCENARIO_DIM_M
-    #             vx_rn = np.array(vx_r, dtype=float) / MAX_RELATIVE_VEL_MS
-    #             vy_rn = np.array(vy_r, dtype=float) / MAX_RELATIVE_VEL_MS
-    #             cos_trk = np.array(cos_track, dtype=float)
-    #             sin_trk = np.array(sin_track, dtype=float)
-    #             dist_n = (np.array(distances, dtype=float) - DISTANCE_CENTER_M) / DISTANCE_SCALE_M
-
-    #             parts = [
-    #                 np.array([cos_drift], dtype=float), 
-    #                 np.array([sin_drift], dtype=float),
-    #                 np.array([airspeed_norm], dtype=float),
-    #                 risk_arr,
-    #                 # risk_arr removed - only used for sorting, not in observation
-    #                 x_rn,
-    #                 y_rn,
-    #                 vx_rn, 
-    #                 vy_rn,
-    #                 cos_trk, # already in [-1,1]
-    #                 sin_trk, # already in [-1,1]
-    #                 dist_n,
-    #             ]
-    #             vec = np.concatenate([v.ravel() for v in parts]).astype(np.float32)
-
-    #             # sanitize and shape-check
-    #             if not np.isfinite(vec).all():
-    #                 note(agent, "non-finite values in observation; sanitizing")
-    #                 vec = np.nan_to_num(vec, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
-
-    #             if vec.shape[0] != dim:
-    #                 note(agent, f"obs length {vec.shape[0]} != expected {dim}; padding/truncating")
-    #                 fixed = np.zeros(dim, dtype=np.float32)
-    #                 n = min(dim, vec.shape[0])
-    #                 fixed[:n] = vec[:n]
-    #                 vec = fixed
+    #             # if vec.shape[0] != dim:
+    #             #     fixed = np.zeros(dim, dtype=np.float32)
+    #             #     n = min(dim, vec.shape[0])
+    #             #     fixed[:n] = vec[:n]
+    #             #     vec = fixed
 
     #             obs[agent] = vec
 
     #         except (IndexError, KeyError, ValueError, RuntimeError) as e:
-    #             note(agent, f"{type(e).__name__}: {e}")
     #             obs[agent] = np.zeros(dim, dtype=np.float32)
-
     #         except Exception as e:
-    #             # unexpected error → still keep training robustly, but make it visible
-    #             note(agent, f"Unexpected {type(e).__name__}: {e}")
     #             obs[agent] = np.zeros(dim, dtype=np.float32)
-    #             # during development you could: raise
 
-    #     return obs, risk_levels, most_risky
+    #     return obs
     def _get_observation(self, active_agents):
         # code that builds the observation vector. 
         
@@ -1219,14 +833,14 @@ class SectorEnv(MultiAgentEnv):
                 cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
                 airspeed = bs.traf.tas[ac_idx] / 18 # normalize on to a max of 18 m/s (~35 kt)
                 
-                # location
-                # dx = (bs.traf.lon[ac_idx] - x_origin) / MAX_LAT_LON # normalized  difference in longitude TODO dit misschien nog * 100 doen ofzo om wat zwaarder mee te laten tellen?
-                # dy = (bs.traf.lat[ac_idx] - y_origin) / MAX_LAT_LON # difference in latitude
+                # Ownship location (relative to center)
+                ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
+                own_dx = float(ac_loc[0]) / 8500.0  # Normalized x position
+                own_dy = float(ac_loc[1]) / 8000.0  # Normalized y position
                 
-                # velocity
+                # Ownship velocity
                 vx = (np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  # normalize on to a max of 18 m/s (~35 kt)
                 vy = (np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]  )  # normalize on to a max of 18 m/s (~35 kt)
-                ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
                 
                 # maybe for determining the relative position of other ac
                 # own_lat = bs.traf.lat[ac_idx]
@@ -1307,7 +921,8 @@ class SectorEnv(MultiAgentEnv):
                         intruder_features.extend([0.0] * 5)
 
                 # Concatenate Ownship + Intruders
-                ownship_feats = np.array([cos_drift, sin_drift, airspeed, dx, dy, vx, vy], dtype=np.float32)
+                # Use own_dx/own_dy (ownship's position), NOT dx/dy from intruder loop
+                ownship_feats = np.array([cos_drift, sin_drift, airspeed, own_dx, own_dy, vx, vy], dtype=np.float32)
                 intruder_feats = np.array(intruder_features, dtype=np.float32)
                 
                 vec = np.concatenate([ownship_feats, intruder_feats])
@@ -1334,23 +949,18 @@ class SectorEnv(MultiAgentEnv):
 
     # ---- Observation statistics helpers ----
     def _get_obs_feature_names(self):
-        dim = 3 +8 * NUM_AC_STATE
+        dim = 7 + 5 * NUM_AC_STATE
         names = []
-        names.extend(["cos_drift", "sin_drift", "airspeed_norm"])
-        # Then 7 blocks each of size NUM_AC_STATE in the order we concatenate
-        blocks = [
-            ("risk", NUM_AC_STATE),  # Removed - only used for sorting
-            ("x_r", NUM_AC_STATE),
-            ("y_r", NUM_AC_STATE),
-            ("vx_r", NUM_AC_STATE),
-            ("vy_r", NUM_AC_STATE),
-            ("cos_trk", NUM_AC_STATE),
-            ("sin_trk", NUM_AC_STATE),
-            ("dist_n", NUM_AC_STATE),
-        ]
-        for label, count in blocks:
-            for i in range(count):
-                names.append(f"{label}_{i}")
+        # Ownship features (7 total)
+        names.extend(["cos_drift", "sin_drift", "airspeed", "x", "y", "vx", "vy"])
+        
+        # Intruder features (5 per intruder)
+        feature_labels = ["distance", "dx_rel", "dy_rel", "vx_rel", "vy_rel"]
+        
+        for i in range(NUM_AC_STATE):
+            for label in feature_labels:
+                names.append(f"intruder_{i}_{label}")
+                
         assert len(names) == dim, f"feature naming mismatch: {len(names)} != {dim}"
         return names
 
@@ -1397,15 +1007,19 @@ class SectorEnv(MultiAgentEnv):
             sd = std[idxs]
             # summarize with min(min), max(max), mean(mean), mean(std)
             print(f"  {label:10s}  min=[{mn.min(): .3f}]  max=[{mx.max(): .3f}]  mean=[{mu.mean(): .3f}]  std~[{sd.mean(): .3f}]")
-        # indices per block
+        # indices per block - ownship has 7 features
         i0 = 0
         pr_range("cos_drift", slice(i0, i0+1)); i0 += 1
         pr_range("sin_drift", slice(i0, i0+1)); i0 += 1
         pr_range("airspeed", slice(i0, i0+1)); i0 += 1
-        # 7 blocks of NUM_AC_STATE (risk removed)
-        labels = ["x_r", "y_r", "vx_r", "vy_r", "cos_trk", "sin_trk", "dist_n"]
+        pr_range("x", slice(i0, i0+1)); i0 += 1
+        pr_range("y", slice(i0, i0+1)); i0 += 1
+        pr_range("vx", slice(i0, i0+1)); i0 += 1
+        pr_range("vy", slice(i0, i0+1)); i0 += 1
+        # 5 features per intruder (NUM_AC_STATE intruders)
+        labels = ["distance", "dx_rel", "dy_rel", "vx_rel", "vy_rel"]
         for lab in labels:
-            pr_range(lab, slice(i0, i0+NUM_AC_STATE))
+            pr_range(f"intruder_{lab}", slice(i0, i0+NUM_AC_STATE))
             i0 += NUM_AC_STATE
 
     def _write_obs_stats_csv(self):
@@ -1441,9 +1055,9 @@ class SectorEnv(MultiAgentEnv):
                 })
     
     def _get_terminateds(self, active_agents):
-        # Only terminate agents that reached their waypoint
-        # Intrusions no longer cause episode termination
-        return {agent: agent in self.waypoint_reached_agents for agent in active_agents}
+        # Terminate agents that reached their waypoint (collision termination disabled)
+        return {agent: (agent in self.waypoint_reached_agents) 
+                for agent in active_agents}
     
     def _get_truncateds(self, active_agents):
         truncateds = {}
@@ -1493,104 +1107,13 @@ class SectorEnv(MultiAgentEnv):
         # progress_reward = max(0, distance_improvement * PROGRESS_REWARD_SCALE)
         
         return progress_reward
-    
-    def _check_path_efficiency(self, agent_id, ac_idx):
-        # \"\"\"Reward for staying close to the straight-line path to waypoint.
-        
-        # This discourages large unnecessary detours while still allowing 
-        # deviations needed for conflict avoidance.
-        
-        # Measures the perpendicular distance from the aircraft to the 
-        # straight line between start position and waypoint.
-        # \"\"\"
-        if not hasattr(self, '_agent_start_positions'):
-            self._agent_start_positions = {}
-        
-        # Store initial position on first call for this agent
-        if agent_id not in self._agent_start_positions:
-            ac_loc = fn.latlong_to_nm(self.center, 
-                np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]]))
-            self._agent_start_positions[agent_id] = ac_loc
-            return 0.0  # No penalty/reward on first step
-        
-        # Get current position
-        ac_loc = fn.latlong_to_nm(self.center, 
-            np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]]))
-        
-        # Get waypoint position
-        wpt_lat, wpt_lon = self.agent_waypoints[agent_id]
-        wpt_loc = fn.latlong_to_nm(self.center, np.array([wpt_lat, wpt_lon]))
-        
-        # Get start position
-        start_loc = self._agent_start_positions[agent_id]
-        
-        # Calculate perpendicular distance to straight-line path
-        # Using point-to-line distance formula
-        start_to_wpt = wpt_loc - start_loc
-        start_to_ac = ac_loc - start_loc
-        
-        path_length = np.linalg.norm(start_to_wpt)
-        
-        if path_length < 1e-6:  # Aircraft at waypoint
-            return 0.0
-        
-        # Project aircraft position onto the path vector
-        projection = np.dot(start_to_ac, start_to_wpt) / path_length
-        
-        # Calculate perpendicular distance (cross-track error)
-        cross_track_error = np.abs(np.cross(start_to_wpt, start_to_ac)) / path_length
-        
-        # Reward inversely proportional to cross-track error
-        # Small detours (< 0.1 NM) get small penalty
-        # Large detours (> 0.3 NM) get larger penalty
-        # Scale: -PATH_EFFICIENCY_SCALE at ~0.3 NM cross-track error
-        penalty = -cross_track_error * PATH_EFFICIENCY_SCALE
-        
-        return float(penalty)
-    
-    def _check_boundary_violation(self, agent_id, ac_idx):
-        # \"\"\"Check if agent has left the polygon boundary (when not at waypoint).
-        
-        # Returns:
-        #     float: Penalty if outside boundary (not at waypoint), 0.0 otherwise
-        # \"\"\"
-        try:
-            # Check if agent has reached waypoint - no penalty if at waypoint
-            if agent_id in self.waypoint_reached_agents:
-                return 0.0
-            
-            # Check if agent is outside the polygon
-            outside = not bs.tools.areafilter.checkInside(
-                self.poly_name,
-                np.array([bs.traf.lat[ac_idx]]),
-                np.array([bs.traf.lon[ac_idx]]),
-                np.array([ALTITUDE * FT2M]),
-            )
-            
-            if outside:
-                return BOUNDARY_VIOLATION_PENALTY
-            else:
-                return 0.0
-                
-        except Exception as e:
-            # If we can't check boundary, assume it's okay
-            return 0.0
-        # Option 2: Only give positive rewards (no penalty for moving away) - CURRENTLY ACTIVE
-        # progress_reward = max(0, distance_improvement * PROGRESS_REWARD_SCALE)
-        
-        return progress_reward
 
-    def _do_action_nn(self, actions):
-        """Apply neural network output actions to BlueSky simulator.
-        
-        Converts normalized actions [-1, 1] to actual heading/speed changes.
-        """
+    def _do_action(self, actions):
         for agent, action in actions.items():
             try: 
                 ac_idx = bs.traf.id2idx(agent)
-                # Convert normalized actions to real changes
-                dh = action[0] * D_HEADING  # Heading change in degrees
-                dv = action[1] * D_VELOCITY  # Speed change in knots
+                dh = action[0] * D_HEADING
+                dv = action[1] * D_VELOCITY
                 heading_new = fn.bound_angle_positive_negative_180(bs.traf.hdg[ac_idx] + dh)
                 speed_new = (bs.traf.tas[ac_idx] * MpS2Kt) + dv
                 bs.stack.stack(f"HDG {agent} {heading_new}")
@@ -1609,7 +1132,7 @@ class SectorEnv(MultiAgentEnv):
         # code to check polygon area
         area_checker = fn.polygon_area(self.poly_points) #  in NM^2
         area_checker_km2 = area_checker * NM2KM * NM2KM
-        # print(f"density generated area of {area_checker_km2:.2f} km^2 = {self.num_ac/area_checker_km2:.2f} ac/km^2")
+        # print(f"density generated area of {area_checker_km2:.2f} km^2 = {6/area_checker_km2:.2f} ac/km^2")
         self.areas_km2.append(area_checker_km2)
         
         p_latlong = [fn.nm_to_latlong(self.center, point) for point in self.poly_points]
@@ -1705,6 +1228,129 @@ class SectorEnv(MultiAgentEnv):
         #self.average_drift = np.append(self.average_drift, drift)
         return drift * DRIFT_PENALTY
     
+    def _check_path_efficiency(self, agent_id, ac_idx):
+        """Reward for staying close to the straight-line path to waypoint.
+        
+        This discourages large unnecessary detours while still allowing 
+        deviations needed for conflict avoidance.
+        
+        Measures the perpendicular distance from the aircraft to the 
+        straight line between start position and waypoint.
+        """
+        if not hasattr(self, '_agent_start_positions'):
+            self._agent_start_positions = {}
+        
+        # Store initial position on first call for this agent
+        if agent_id not in self._agent_start_positions:
+            ac_loc = fn.latlong_to_nm(self.center, 
+                np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]]))
+            self._agent_start_positions[agent_id] = ac_loc
+            return 0.0  # No penalty/reward on first step
+        
+        # Get current position
+        ac_loc = fn.latlong_to_nm(self.center, 
+            np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]]))
+        
+        # Get waypoint position
+        wpt_lat, wpt_lon = self.agent_waypoints[agent_id]
+        wpt_loc = fn.latlong_to_nm(self.center, np.array([wpt_lat, wpt_lon]))
+        
+        # Get start position
+        start_loc = self._agent_start_positions[agent_id]
+        
+        # Calculate perpendicular distance to straight-line path
+        # Using point-to-line distance formula
+        start_to_wpt = wpt_loc - start_loc
+        start_to_ac = ac_loc - start_loc
+        
+        path_length = np.linalg.norm(start_to_wpt)
+        
+        if path_length < 1e-6:  # Aircraft at waypoint
+            return 0.0
+        
+        # Project aircraft position onto the path vector
+        projection = np.dot(start_to_ac, start_to_wpt) / path_length
+        
+        # Calculate perpendicular distance (cross-track error)
+        cross_track_error = np.abs(np.cross(start_to_wpt, start_to_ac)) / path_length
+        
+        # Reward inversely proportional to cross-track error
+        # Small detours (< 0.1 NM) get small penalty
+        # Large detours (> 0.3 NM) get larger penalty
+        # Scale: -PATH_EFFICIENCY_SCALE at ~0.3 NM cross-track error
+        penalty = -cross_track_error * PATH_EFFICIENCY_SCALE
+        
+        return float(penalty)
+    
+    def _check_boundary_violation(self, agent_id, ac_idx):
+        """Check if agent has left the polygon boundary (when not at waypoint).
+        
+        Returns:
+            float: Penalty if outside boundary (not at waypoint), 0.0 otherwise
+        """
+        try:
+            # Check if agent has reached waypoint - no penalty if at waypoint
+            if agent_id in self.waypoint_reached_agents:
+                return 0.0
+            
+            # Check if agent is outside the polygon
+            outside = not bs.tools.areafilter.checkInside(
+                self.poly_name,
+                np.array([bs.traf.lat[ac_idx]]),
+                np.array([bs.traf.lon[ac_idx]]),
+                np.array([ALTITUDE * FT2M]),
+            )
+            
+            if outside:
+                return BOUNDARY_VIOLATION_PENALTY
+            else:
+                return 0.0
+                
+        except Exception as e:
+            # If we can't check boundary, assume it's okay
+            return 0.0
+    
+    def _check_collisions(self, active_agents):
+        """Check for collisions between aircraft and mark collided agents for termination.
+        
+        A collision occurs when two aircraft are closer than COLLISION_DISTANCE.
+        Both aircraft in a collision are marked for termination.
+        
+        Args:
+            active_agents: List of currently active agent IDs
+        """
+        agents_to_check = [agent for agent in active_agents if agent not in self.collided_agents]
+        
+        for i, agent_i in enumerate(agents_to_check):
+            if agent_i in self.collided_agents:
+                continue
+                
+            try:
+                ac_idx_i = bs.traf.id2idx(agent_i)
+            except (IndexError, KeyError):
+                continue
+            
+            for agent_j in agents_to_check[i+1:]:
+                if agent_j in self.collided_agents:
+                    continue
+                    
+                try:
+                    ac_idx_j = bs.traf.id2idx(agent_j)
+                except (IndexError, KeyError):
+                    continue
+                
+                # Calculate distance between aircraft
+                _, distance = bs.tools.geo.kwikqdrdist(
+                    bs.traf.lat[ac_idx_i], bs.traf.lon[ac_idx_i],
+                    bs.traf.lat[ac_idx_j], bs.traf.lon[ac_idx_j]
+                )
+                
+                # Check for collision
+                if distance < COLLISION_DISTANCE:
+                    self.collided_agents.add(agent_i)
+                    self.collided_agents.add(agent_j)
+                    print(f"[COLLISION] Agents {agent_i} and {agent_j} collided at distance {distance*1852:.1f}m")
+    
     def _check_proximity(self, agent_id, ac_idx):
         """Calculate proximity penalty for getting close to other aircraft.
         
@@ -1742,13 +1388,13 @@ class SectorEnv(MultiAgentEnv):
         band = soft_thresh - INTRUSION_DISTANCE
         ratio = (soft_thresh - min_dist) / band if band > 0 else 0.0
         
-        # Clamp at 1.0, but DON'T return 0 if inside intrusion.
+        # TWEAK 1: Clamp at 1.0, but DON'T return 0 if inside intrusion.
         # We want the "pain" of the soft penalty to persist on top of the hard penalty.
         ratio = np.clip(ratio, 0.0, 1.0)
 
-        # Use Square (Exponential) for the "Force Field" effect.
+        # TWEAK 2: Use Square (Exponential) for the "Force Field" effect.
         # 0.5 distance -> 0.25 pain. 0.9 distance -> 0.81 pain.
-        return PROXIMITY_MAX_PENALTY * float(ratio ** 2)
+        return -PROXIMITY_MAX_PENALTY * float(ratio ** 2)
     
     def _check_intrusion(self, agent_id, ac_idx):
         """Return intrusion penalty for this agent on this step, and intrusion flag.

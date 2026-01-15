@@ -237,7 +237,7 @@ if ray.is_initialized():
     ray.shutdown()
 
 # Point to the Two_stage_AM directory containing attention_model_A.py
-two_stage_am_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage_AM\1_9_PPO"
+two_stage_am_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage_AM\1_13_PPO"
 if two_stage_am_dir not in sys.path:
     sys.path.insert(0, two_stage_am_dir)
 
@@ -261,43 +261,43 @@ runtime_env = {
 # ================================ EXPORT STAGE 1 MODEL ==================================
 # Stage 1 is the behavior cloning (imitation learning) phase
 # This model has learned to mimic the MVP teacher actions
-# print("\n" + "="*70)
-# print("🎯 EXPORTING STAGE 1 (BEHAVIOR CLONING) MODEL")
-# print("="*70)
+print("\n" + "="*70)
+print("🎯 EXPORTING STAGE 1 (BEHAVIOR CLONING) MODEL")
+print("="*70)
 
-# export_policy_torch_old_api(
-#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage_AM\1_7\models\sectorcr_ma_sac\stage1_best_weights",
-#     "shared_policy",
-#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_Stage1.pt",
-#     env_creator=sector_env_creator,
-#     runtime_env=runtime_env
-# )
+export_policy_torch_old_api(
+    r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage_AM\1_13_PPO\models\sectorcr_ma_sac\stage1_best_weights",
+    "shared_policy",
+    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_Stage1_vs2.pt",
+    env_creator=sector_env_creator,
+    runtime_env=runtime_env
+)
 
-# print("\n" + "="*70)
-# print("✅ STAGE 1 EXPORT COMPLETE")
-# print("   Model saved to: models_boris/Two_stage_AM_Stage1.pt")
-# print("   This is the behavior cloning model (teacher imitation)")
+print("\n" + "="*70)
+print("✅ STAGE 1 EXPORT COMPLETE")
+print("   Model saved to: models_boris/Two_stage_AM_Stage1.pt")
+print("   This is the behavior cloning model (teacher imitation)")
 # print("="*70)
 
 # ================================ EXPORT STAGE 2 MODEL ==================================
 # Stage 2 is the RL fine-tuning phase
 # This exports the best checkpoint from 1_9_PPO training
 
-print("\n" + "="*70)
-print("🚀 EXPORTING STAGE 2 (RL FINE-TUNED) MODEL")
-print("="*70)
+# print("\n" + "="*70)
+# print("🚀 EXPORTING STAGE 2 (RL FINE-TUNED) MODEL")
+# print("="*70)
 
-# Export the best Stage 2 checkpoint from 1_9_PPO
-export_policy_torch_old_api(
-    r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage_AM\1_9_PPO\models\sectorcr_ma_sac\best_iter_00112",
-    "shared_policy",
-    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_PPO_Stage2.pt",
-    env_creator=sector_env_creator,
-    runtime_env=runtime_env
-)
+# # Export the best Stage 2 checkpoint from 1_9_PPO
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\Two_stage_AM\1_9_PPO\models\sectorcr_ma_sac\best_iter_00112",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_PPO_Stage2.pt",
+#     env_creator=sector_env_creator,
+#     runtime_env=runtime_env
+# )
 
-print("\n" + "="*70)
-print("✅ STAGE 2 EXPORT COMPLETE")
-print("   Model saved to: models_boris/Two_stage_AM_Stage2_iter112.pt")
-print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
-print("="*70)
+# print("\n" + "="*70)
+# print("✅ STAGE 2 EXPORT COMPLETE")
+# print("   Model saved to: models_boris/Two_stage_AM_Stage2_iter112.pt")
+# print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
+# print("="*70)

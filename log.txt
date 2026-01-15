@@ -108,9 +108,13 @@ terug naar vorige parameters. en misschien niet de drones verwijderen als ze bot
 drones worden niet meer verwijdert als ze botsen. 
 zelfde parameters voor reward functie als regular SAC (gepakt van SAC_new environment)
 
-1_12
+1_13
 ownship feature bypassen zodat ze niet mee worden genomen in de attention mechanism head
 dit zou het niet meer naar waypoint probleem gaan moeten oplossen
+Ook de observation vector geupdate. zat een klein foutje in, zelfde als die van de ppo nu. 
+environmet van 12_17 gepakt, qua rewards enzo
+
+ de code op de  nlr server aangepast naar dat de vliegtuigen helemaal verwijdert worden als ze botsen. hopen dat dat de stabiliteit van het trainen verbetert.
 
 ------------------------------------PPO_AM----------------------------------------
 moet helemaal nog gebeuren, maar kan je ook laten schieten
@@ -182,6 +186,7 @@ goeie start, agents ontwijken alle drones maar gaan niet naar waypoint.
 
 1_9_PPO
 waypoint reach reward omhoog naar: 5
+dit werkt oke maar gaat niet naar de waypoints toe. 
  
 1_12_PPO
 dense reward van naar goal toe gaan moet omhoog. een constante pull naar de waypoint toe. en misschein step 
@@ -195,12 +200,16 @@ richting het policy NN. dit zorgt ervoor dat de attnetion head ze niet onbelangi
 1_13_PPO
 er zat een bug in de observation vector. 
 die is nu gefixt en daarop trainen. als ie hierdoor nog steeds niet naar de waypoints toe gaat is het tijd voor de volgende upgrades:
+stage 1 nog trainen! 
 
-waypoint reach reward omhoog naar 8.0 # was 6
-progress reward scale naar 8.0  # was 4
-BOUNDARY_VIOLATION_PENALTY = -4.0 # was -3
-if distance_improvement <= 0:
-            progress_reward -= 0.01 # was 0.005
+1_14_PPO
+die vorige bleek toch kut te zijn. weer terug naar de oude opstelling. 
+
+1_15_PPO
+terug naar de AM van 1_9_PPO.
+maar wel de obseravtino vector wat aangepast want daar zaten fouten in . 
+stage 1 weer als eerste runnen. 
+
 --------------------------------------Two_Stage_SAC -----------------------------------------
 dit werkt niet hetzelfde als PPO
 idee is om de buffer te vullen met 30% mvp data voordat de training begint. 
