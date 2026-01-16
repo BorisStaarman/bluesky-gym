@@ -40,7 +40,7 @@ N_AGENTS = 20
 # model settings
 ACTION_FREQUENCY = 1 # how many sim MVP_2Ds per action
 NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
-MAX_STEPS = 400 # max steps per episode
+MAX_STEPS = 300 # max steps per episode
 
 # constants to control actions, 
 D_HEADING = 45 # degrees
@@ -1217,7 +1217,7 @@ class SectorEnv(MultiAgentEnv):
                 drift = fn.bound_angle_positive_negative_180(ac_hdg - wpt_qdr)
                 
                 cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
-                airspeed = bs.traf.tas[ac_idx] / 18 # normalize on to a max of 18 m/s (~35 kt)
+                airspeed = bs.traf.tas[ac_idx] / 36.0 # normalize on to a max of 18 m/s (~35 kt)
                 
                 # Get ownship position in meters from center
                 ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
@@ -1309,7 +1309,7 @@ class SectorEnv(MultiAgentEnv):
                         intruder_features.extend([0.0] * 5)
 
                 # Concatenate Ownship + Intruders
-                ownship_feats = np.array([cos_drift, sin_drift, airspeed, dx, dy, vx / 18.0, vy / 18.0], dtype=np.float32)
+                ownship_feats = np.array([cos_drift, sin_drift, airspeed, dx, dy, vx / 36.0, vy / 36.0], dtype=np.float32)
                 intruder_feats = np.array(intruder_features, dtype=np.float32)
                 
                 vec = np.concatenate([ownship_feats, intruder_feats])

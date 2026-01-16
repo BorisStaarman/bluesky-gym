@@ -59,7 +59,7 @@ METRICS_DIR = os.path.join(script_dir, "metrics")
 
 # --- CHOOSE WHICH CHECKPOINT TO EVALUATE ---
 # Set to True to use stage1_best_weights, False to use stage1_weights (last iteration)
-USE_BEST_STAGE1_WEIGHTS = False
+USE_BEST_STAGE1_WEIGHTS = True
 
 
 

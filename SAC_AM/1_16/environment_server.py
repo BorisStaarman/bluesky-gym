@@ -37,16 +37,15 @@ MAX_STEPS = 400 # max steps per episode
 # =========================== REWARD PENALTIES PARAMETERS ===========================
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
-WAYPOINT_REACHED_REWARD = 10.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 5.0 # Scale factor for distance-to-waypoint progress
+WAYPOINT_REACHED_REWARD = 15.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 10.0 # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
-BOUNDARY_VIOLATION_PENALTY = -10.0  # Penalty for leaving polygon boundary (not at waypoint)
-TIMOUT_PENALTY = -10.0  # Penalty for reaching max steps without waypoint
-STEP_PENALTY = -0.01  # Small penalty applied every step to encourage efficiency
+BOUNDARY_VIOLATION_PENALTY = -2.5  # Penalty for leaving polygon boundary (not at waypoint)
+STEP_PENALTY = -0.05  # Small penalty applied every step to encourage efficiency
 
 # Proximity penalty parameters
-SOFT_INTRUSION_FACTOR = 2.0  # Soft zone starts at 2.0x the intrusion distance (200m when intrusion is 100m)
-PROXIMITY_MAX_PENALTY = -2.0  # Maximum penalty when at hard boundary (100m)
+SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance (150m when intrusion is 100m)
+PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary (100m)
 
 # constants to control actions, 
 D_HEADING = 45 # degrees
@@ -216,7 +215,6 @@ class SectorEnv(MultiAgentEnv):
         self.collided_agents = set() 
         self.waypoint_reached_agents = set()
         self.previous_distances = {}
-        self.min_distances = {}  # Track minimum distance achieved per agent (for record-distance reward)
         self._penalized_pairs = set()
         self._pairs_penalized_this_step = set()
         
@@ -249,7 +247,6 @@ class SectorEnv(MultiAgentEnv):
                     bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], wpt_lat, wpt_lon
                 )
                 self.previous_distances[agent] = dist_nm
-                self.min_distances[agent] = dist_nm  # Initialize record distance
             except Exception:
                 pass
 
@@ -310,17 +307,6 @@ class SectorEnv(MultiAgentEnv):
             bs.sim.step()
         
         for a in agents_to_remove:
-            # Apply stay-away timeout penalty if agent was truncated due to time limit
-            # and didn't reach waypoint
-            if truncateds.get(a, False) and a not in self.waypoint_reached_agents:
-                hit_time_limit = self._agent_steps.get(a, 0) >= MAX_STEPS
-                if hit_time_limit:
-                    # Severe penalty for timing out without reaching waypoint
-                    timeout_penalty = TIMOUT_PENALTY
-                    if a in rewards:
-                        rewards[a] += timeout_penalty
-                    print(f"[TIMEOUT PENALTY] Agent {a} reached MAX_STEPS without waypoint: {timeout_penalty}")
-            
             n = max(1, self._rewards_counts.get(a, 0))
             m_drift    = self._rewards_acc.get(a, {}).get("drift", 0.0)    / n
             m_progress = self._rewards_acc.get(a, {}).get("progress", 0.0) / n
@@ -498,7 +484,7 @@ class SectorEnv(MultiAgentEnv):
                 
                 rewards[agent] = (drift_reward + intrusion_reward + 
                                 progress_reward + path_efficiency_reward + 
-                                boundary_penalty + proximity_penalty + step_penalty)/10
+                                boundary_penalty + proximity_penalty + step_penalty)
                 
                 # Sla stats op (alleen als alles goed ging)
                 self._rewards_acc[agent]["drift"]     += float(drift_reward)
@@ -734,7 +720,7 @@ class SectorEnv(MultiAgentEnv):
                 ac_hdg = bs.traf.hdg[ac_idx]
                 drift = fn.bound_angle_positive_negative_180(ac_hdg - wpt_qdr)
                 cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
-                airspeed = bs.traf.tas[ac_idx] / 36.0
+                airspeed = bs.traf.tas[ac_idx] / 18.0
                 
                 ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
                 own_dx, own_dy = float(ac_loc[0]) / 1000.0, float(ac_loc[1]) / 1000.0
@@ -925,21 +911,24 @@ class SectorEnv(MultiAgentEnv):
             else:
                 return 0.0
         
-        # Record-Distance Reward (Potential Based):
-        # Only reward the agent if it achieves a new record (closer than ever before)
-        min_dist = self.min_distances.get(agent_id, current_dist)
+        # Dense reward: reward for getting closer to waypoint each step
+        # Use previous_distances (already tracked for other purposes)
+        prev_dist = self.previous_distances.get(agent_id, current_dist)
+        distance_improvement = prev_dist - current_dist  # Positive if getting closer
+        self.previous_distances[agent_id] = current_dist
         
-        if current_dist < min_dist:
-            # New record! Calculate improvement from previous record
-            distance_improvement = min_dist - current_dist
-            self.min_distances[agent_id] = current_dist  # Update record
-            
-            # Scale the progress reward
-            progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
-            return progress_reward
-        else:
-            # No improvement on record distance - no reward
-            return 0.0
+        # Scale the progress reward to make it more significant
+        # Typical distance improvement per step: ~0.001-0.01 NM
+        # With scale factor 5.0: reward ~0.005-0.05 per step
+        # This helps offset STEP_PENALTY (-0.005) when making progress
+        
+        # Option 1: Give reward AND penalty (positive when closer, negative when farther)
+        progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
+        
+        # Option 2: Only give positive rewards (no penalty for moving away) - CURRENTLY ACTIVE
+        # progress_reward = max(0, distance_improvement * PROGRESS_REWARD_SCALE)
+        
+        return progress_reward
 
     def _do_action(self, actions):
         # Haal de actuele lijst van ID's op die BlueSky op DIT moment kent

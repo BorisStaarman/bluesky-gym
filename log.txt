@@ -116,6 +116,12 @@ environmet van 12_17 gepakt, qua rewards enzo
 
  de code op de  nlr server aangepast naar dat de vliegtuigen helemaal verwijdert worden als ze botsen. hopen dat dat de stabiliteit van het trainen verbetert.
 
+1_16
+attention model met trainable temperature van ppo algorithme, en wat van de rward functie daarvan geget
+nu proberen te tunen. 
+run config2: agents gaan op hun plek circlen. 
+run config 3: minpunten als ze nog in de simulatie zitten en ze berijken niet het waypoitn aan het einde. ook is de progress reward aangepast om cirkelen niet te belonen. 
+
 ------------------------------------PPO_AM----------------------------------------
 moet helemaal nog gebeuren, maar kan je ook laten schieten
 
@@ -209,7 +215,18 @@ die vorige bleek toch kut te zijn. weer terug naar de oude opstelling.
 terug naar de AM van 1_9_PPO.
 maar wel de obseravtino vector wat aangepast want daar zaten fouten in . 
 stage 1 weer als eerste runnen. 
+DIT WERKT GOED!!!! DEZE TUNEN
 
+1_16_PPO
+stag1: learnable temperature parameter
+alle velocities standardized met 36. airspeed en vx vy
+train batch size naar 32000 ipv 16
+minibatch omhoog naar 2000, num sgd iter naar 10
+
+stage 2
+changes: 
+Training batch size = 64.000
+max_steps is 300
 --------------------------------------Two_Stage_SAC -----------------------------------------
 dit werkt niet hetzelfde als PPO
 idee is om de buffer te vullen met 30% mvp data voordat de training begint. 

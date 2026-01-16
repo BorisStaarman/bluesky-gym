@@ -73,12 +73,12 @@ def register_envs():
     # # and passes it as arguments to your environment's __init__ method.
     
     # DIT IS NU WEG GEHAALD DUS MOET BJI ALLE MAIN.PY ERBIJ, KIJKN NAAR DE MAIN.PY VAN 
-    # from bluesky_gym.envs.ma_env_SAC_AM import SectorEnv
+    from bluesky_gym.envs.ma_env_SAC_AM import SectorEnv
     # from bluesky_gym.envs.ma_env_ppo import SectorEnv
     # from bluesky_gym.envs.ma_env_two_stage import SectorEnv 
   
     # from bluesky_gym.envs.ma_env_two_stage_AM import SectorEnv
-    from bluesky_gym.envs.ma_env_two_stage_AM_PPO import SectorEnv
+    # from bluesky_gym.envs.ma_env_two_stage_AM_PPO import SectorEnv
     # from bluesky_gym.envs.ma_env_ppo_AM import SectorEnv
     # from bluesky_gym.envs.ma_env_two_stage_PPO import SectorEnv
     # from bluesky_gym.envs.ma_env_two_stage_SAC import SectorEnv

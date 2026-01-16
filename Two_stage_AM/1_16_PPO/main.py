@@ -107,10 +107,10 @@ class MVPDataBridgeCallback(DefaultCallbacks):
 N_AGENTS = 20  # Number of agents for training
 
 # --- STAGE CONTROL ---
-RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
+RUN_STAGE_2 = False  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
 
 # --- STAGE 1: IMITATION LEARNING (PPO with custom loss) ---
-iterations_stage1 = 75  # Number of iterations for Stage 1 imitation learning
+iterations_stage1 = 80  # Number of iterations for Stage 1 imitation learning
 
 # --- WARM-UP PHASE SETTINGS ---
 WARMUP_ITERATIONS = 10  # Number of iterations to warm up critic with frozen policy and attention
@@ -223,9 +223,9 @@ def build_trainer(n_agents, stage=1, restore_path=None):
         training_config = {
             # Optimization Params
             "lr": 1e-4,
-            "train_batch_size": 16000,
-            "minibatch_size": 1024, 
-            "num_sgd_iter": 20,
+            "train_batch_size": 32000,
+            "minibatch_size": 2000, 
+            "num_sgd_iter": 10,
             "grad_clip": 1.0,
             "gamma": 0.99,
             
@@ -254,7 +254,7 @@ def build_trainer(n_agents, stage=1, restore_path=None):
         
         training_config = {
             "lr": WARMUP_LR,  # Start with higher LR for critic learning during warm-up
-            "train_batch_size": 32000,
+            "train_batch_size": 64000,
             "minibatch_size": 2000,
             "num_sgd_iter": 12,
             "clip_param": 0.2,
@@ -304,7 +304,7 @@ def build_trainer(n_agents, stage=1, restore_path=None):
             policies={"shared_policy": (None, None, None, {})},
             policy_mapping_fn=policy_map,
         )
-        .resources(num_gpus=0)
+        .resources(num_gpus=1)
     )
     
     # 4. Build the Algorithm Instance
@@ -534,7 +534,7 @@ if __name__ == "__main__":
     # and if we actually want to run stage 1.
     
     stage1_checkpoint = os.path.join(CHECKPOINT_DIR, "stage1_best_weights")
-    run_stage1 = False
+    run_stage1 = True
     restored_from = None  # Initialize to None - will be set if checkpoint found or Stage 1 runs
     
     # Check if we are trying to resume a Stage 2 run
@@ -698,6 +698,7 @@ if __name__ == "__main__":
     print(f"   Learning Rate: {WARMUP_LR:.2e} (high enough for critic to learn from scratch)")
     print(f"   VF Loss Coeff: 2.0 (increased for stronger critic gradients)")
     print(f"   Entropy: ~-2.0 (low std=0.082, policy stays near teacher actions)")
+    print(f"   Attention Temperature: 3.0 (learnable, will adapt focus sharpness)")
     print(f"   Critic will learn to evaluate pre-trained policy behavior")
     print(f"{'='*60}\n")
     
@@ -707,6 +708,8 @@ if __name__ == "__main__":
     entropy_history = []
     alpha_history = []
     q_loss_history = []
+    vf_explained_var_history = []
+    temperature_history = []
     reward_history = []
     episode_length_history = []
     total_training_steps = 0
@@ -799,8 +802,17 @@ if __name__ == "__main__":
         policy_loss_history.append(policy_loss)
         q_loss_history.append(vf_loss)
         entropy_history.append(entropy)
+        vf_explained_var_history.append(vf_explained_var)
         reward_history.append(mean_rew)
         episode_length_history.append(ep_len)
+        
+        # Extract temperature from attention model
+        policy = algo.get_policy("shared_policy")
+        if hasattr(policy, 'model') and hasattr(policy.model, 'temperature'):
+            current_temp = policy.model.temperature.item()
+            temperature_history.append(current_temp)
+        else:
+            temperature_history.append(float('nan'))
         
         # Enhanced progress display with warm-up phase indicator
         phase_indicator = "[WARM-UP] 🧊" if i <= WARMUP_ITERATIONS else "[FINE-TUNE] 🔥"
@@ -852,22 +864,58 @@ if __name__ == "__main__":
 
     # --- Plotting (UPDATED) ---
     # Use savefig instead of show to prevent freezing
-    fig, axes = plt.subplots(3, 1, figsize=(10, 15))
+    fig, axes = plt.subplots(6, 1, figsize=(10, 24))
     
     # Plot Reward
     axes[0].plot(reward_history, label="Reward")
     axes[0].set_title("Training Reward")
+    axes[0].set_xlabel("Iteration")
+    axes[0].set_ylabel("Reward")
     axes[0].grid(True)
+    axes[0].legend()
     
     # Plot Loss
     axes[1].plot(total_loss_history, label="Total Loss", color="orange")
     axes[1].set_title("Training Loss")
+    axes[1].set_xlabel("Iteration")
+    axes[1].set_ylabel("Loss")
     axes[1].grid(True)
+    axes[1].legend()
+    
+    # Plot Entropy
+    axes[2].plot(entropy_history, label="Entropy", color="purple")
+    axes[2].set_title("Policy Entropy")
+    axes[2].set_xlabel("Iteration")
+    axes[2].set_ylabel("Entropy")
+    axes[2].grid(True)
+    axes[2].legend()
+    
+    # Plot Value Function Explained Variance (Critic Accuracy)
+    axes[3].plot(vf_explained_var_history, label="VF Explained Variance", color="red")
+    axes[3].set_title("Value Function Explained Variance (Critic Accuracy)")
+    axes[3].set_xlabel("Iteration")
+    axes[3].set_ylabel("Explained Variance")
+    axes[3].axhline(y=1.0, color='green', linestyle='--', alpha=0.3, label='Perfect (1.0)')
+    axes[3].axhline(y=0.0, color='gray', linestyle='--', alpha=0.3, label='Random (0.0)')
+    axes[3].grid(True)
+    axes[3].legend()
+    
+    # Plot Attention Temperature
+    axes[4].plot(temperature_history, label="Attention Temperature", color="cyan")
+    axes[4].set_title("Attention Temperature (Learnable Parameter)")
+    axes[4].set_xlabel("Iteration")
+    axes[4].set_ylabel("Temperature")
+    axes[4].axhline(y=3.0, color='gray', linestyle='--', alpha=0.3, label='Initial (3.0)')
+    axes[4].grid(True)
+    axes[4].legend()
     
     # Plot Ep Length
-    axes[2].plot(episode_length_history, label="Ep Length", color="green")
-    axes[2].set_title("Episode Length")
-    axes[2].grid(True)
+    axes[5].plot(episode_length_history, label="Ep Length", color="green")
+    axes[5].set_title("Episode Length")
+    axes[5].set_xlabel("Iteration")
+    axes[5].set_ylabel("Steps")
+    axes[5].grid(True)
+    axes[5].legend()
     
     plot_path = os.path.join(METRICS_DIR, f"training_summary_{RUN_ID}.png")
     plt.tight_layout()
