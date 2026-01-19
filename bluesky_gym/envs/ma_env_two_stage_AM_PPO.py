@@ -64,13 +64,13 @@ CPA_TIME_HORIZON_S = 15 # seconds
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 10.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 5.0  # Scale factor for distance-to-waypoint progress
+WAYPOINT_REACHED_REWARD = 15.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 10.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
 BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
-PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary
+PROXIMITY_MAX_PENALTY = -4.0  # Maximum penalty when at hard boundary
 
 # logging
 LOG_EVERY_N = 100  # throttle repeated warnings
@@ -244,6 +244,7 @@ class SectorEnv(MultiAgentEnv):
         self.total_intrusions = 0
         
         self.previous_distances = {}
+        self.min_distances = {}  # Track minimum distance achieved per agent (for record-distance reward)
         self.waypoint_reached_agents = set()
         
         self._generate_polygon()
@@ -256,6 +257,7 @@ class SectorEnv(MultiAgentEnv):
                 wpt_lat, wpt_lon = self.agent_waypoints[agent]
                 _, dist_nm = bs.tools.geo.kwikqdrdist(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], wpt_lat, wpt_lon)
                 self.previous_distances[agent] = dist_nm
+                self.min_distances[agent] = dist_nm  # Initialize record distance
             except Exception:
                 pass
 
@@ -1477,24 +1479,28 @@ class SectorEnv(MultiAgentEnv):
             else:
                 return 0.0
         
-        # Dense reward: reward for getting closer to waypoint each step
-        # Use previous_distances (already tracked for other purposes)
-        prev_dist = self.previous_distances.get(agent_id, current_dist)
-        distance_improvement = prev_dist - current_dist  # Positive if getting closer
-        self.previous_distances[agent_id] = current_dist
+        # Record-Distance Reward (Potential Based):
+        # Only reward the agent if it achieves a new record (closer than ever before)
+        min_dist = self.min_distances.get(agent_id, current_dist)
         
-        # Scale the progress reward to make it more significant
-        # Typical distance improvement per step: ~0.001-0.01 NM
-        # With scale factor 5.0: reward ~0.005-0.05 per step
-        # This helps offset STEP_PENALTY (-0.005) when making progress
+        if current_dist < min_dist:
+            # New record! Calculate improvement from previous record
+            distance_improvement = min_dist - current_dist
+            self.min_distances[agent_id] = current_dist  # Update record
+            
+            # Scale the progress reward 
+            progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
+            return progress_reward
         
-        # Option 1: Give reward AND penalty (positive when closer, negative when farther)
-        progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
+            
+        else: # No improvement on record distance - no reward
+            # 2. Add a tiny incentive to keep moving toward the target speed 
+            # even if not breaking a distance record
+            target_speed = 35.0 # knots
+            speed_error = abs((bs.traf.tas[ac_idx] * MpS2Kt) - target_speed)
+            progress_reward = -0.001 * speed_error # Very small penalty for slow flight
         
-        # Option 2: Only give positive rewards (no penalty for moving away) - CURRENTLY ACTIVE
-        # progress_reward = max(0, distance_improvement * PROGRESS_REWARD_SCALE)
-        
-        return progress_reward
+            return progress_reward
     
     def _check_path_efficiency(self, agent_id, ac_idx):
         # \"\"\"Reward for staying close to the straight-line path to waypoint.
