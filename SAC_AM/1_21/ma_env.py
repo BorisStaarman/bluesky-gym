@@ -32,23 +32,26 @@ FT2M = 0.3048
 # model settings
 ACTION_FREQUENCY = 1 # how many sim steps per action
 NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
-MAX_STEPS = 300 # max steps per episode
+MAX_STEPS = 400 # max steps per episode
 
 # =========================== REWARD PENALTIES PARAMETERS ===========================
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
-STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
-WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 15.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 10.0  # Scale factor for distance-to-waypoint progress
-PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
-BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
-SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
-PROXIMITY_MAX_PENALTY = -4.0  # Maximum penalty when at hard boundary
+WAYPOINT_REACHED_REWARD = 10.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 5.0 # Scale factor for distance-to-waypoint progress
+PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
+BOUNDARY_VIOLATION_PENALTY = -2.5  # Penalty for leaving polygon boundary (not at waypoint)
+STEP_PENALTY = -0.01  # Small penalty applied every step to encourage efficiency
+
+# Proximity penalty parameters
+SOFT_INTRUSION_FACTOR = 2.0  # Soft zone starts at 2.0x the intrusion distance (200m when intrusion is 100m)
+PROXIMITY_MAX_PENALTY = -2.0  # Maximum penalty when at hard boundary (100m)
 
 # constants to control actions, 
 D_HEADING = 45 # degrees
 D_VELOCITY = 10/3 # knots
+# waypoint rewards
+WAYPOINT_RADIUS = 0.05 # in NM is about 90 meters
 
 # normalization parameters
 # MAX_SCENARIO_DIM_M = (POLY_AREA_RANGE[1] + POLY_AREA_RANGE[0])/2 * NM2KM * 1000.0 * 2.0 # Old value
@@ -68,7 +71,7 @@ AIRSPEED_CENTER_KTS = 35.0
 AIRSPEED_SCALE_KTS = 10.0 * 3.4221
 
 # collision risk parameters
-PROTECTED_ZONE_M = 105  # meters
+PROTECTED_ZONE_M = 100  # meters
 CPA_TIME_HORIZON_S = 15 # seconds
 
 # logging
@@ -212,7 +215,6 @@ class SectorEnv(MultiAgentEnv):
         self.collided_agents = set() 
         self.waypoint_reached_agents = set()
         self.previous_distances = {}
-        self.min_distances = {}  # Track minimum distance achieved per agent (for record-distance reward)
         self._penalized_pairs = set()
         self._pairs_penalized_this_step = set()
         
@@ -245,7 +247,6 @@ class SectorEnv(MultiAgentEnv):
                     bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], wpt_lat, wpt_lon
                 )
                 self.previous_distances[agent] = dist_nm
-                self.min_distances[agent] = dist_nm  # Initialize record distance
             except Exception:
                 pass
 
@@ -483,9 +484,9 @@ class SectorEnv(MultiAgentEnv):
                 
                 rewards[agent] = (drift_reward + intrusion_reward + 
                                 progress_reward + path_efficiency_reward + 
-                                boundary_penalty + proximity_penalty + step_penalty) / 1000.0
+                                boundary_penalty + proximity_penalty + step_penalty)
                 
-                # accumulate for per-episode stats
+                # Sla stats op (alleen als alles goed ging)
                 self._rewards_acc[agent]["drift"]     += float(drift_reward)
                 self._rewards_acc[agent]["progress"]  += float(progress_reward)
                 self._rewards_acc[agent]["intrusion"] += float(intrusion_reward)
@@ -495,14 +496,13 @@ class SectorEnv(MultiAgentEnv):
                 self._rewards_acc[agent]["step"] += float(step_penalty)
                 self._rewards_counts[agent]          += 1
                 
-                infos[agent]["reward_drift"] = drift_reward
-                infos[agent]["reward_intrusion"] = intrusion_reward
-                infos[agent]["reward_progress"] = progress_reward
-                infos[agent]["reward_path_efficiency"] = path_efficiency_reward
-                infos[agent]["reward_boundary"] = boundary_penalty
-                infos[agent]["reward_proximity"] = proximity_penalty
-                infos[agent]["reward_step"] = step_penalty
-                infos[agent]["intrusion"] = agent_intrusion
+                # Vul info dict voor debugging
+                infos[agent].update({
+                    "reward_drift": drift_reward,
+                    "reward_intrusion": intrusion_reward,
+                    "reward_progress": progress_reward,
+                    "intrusion": agent_intrusion
+                })
                 
             except Exception as e:
                 # Voorkom nan door een neutrale reward te geven bij een error
@@ -911,28 +911,24 @@ class SectorEnv(MultiAgentEnv):
             else:
                 return 0.0
         
-        # Record-Distance Reward (Potential Based):
-        # Only reward the agent if it achieves a new record (closer than ever before)
-        min_dist = self.min_distances.get(agent_id, current_dist)
+        # Dense reward: reward for getting closer to waypoint each step
+        # Use previous_distances (already tracked for other purposes)
+        prev_dist = self.previous_distances.get(agent_id, current_dist)
+        distance_improvement = prev_dist - current_dist  # Positive if getting closer
+        self.previous_distances[agent_id] = current_dist
         
-        if current_dist < min_dist:
-            # New record! Calculate improvement from previous record
-            distance_improvement = min_dist - current_dist
-            self.min_distances[agent_id] = current_dist  # Update record
-            
-            # Scale the progress reward 
-            progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
-            return progress_reward
+        # Scale the progress reward to make it more significant
+        # Typical distance improvement per step: ~0.001-0.01 NM
+        # With scale factor 5.0: reward ~0.005-0.05 per step
+        # This helps offset STEP_PENALTY (-0.005) when making progress
         
-            
-        else: # No improvement on record distance - no reward
-            # 2. Add a tiny incentive to keep moving toward the target speed 
-            # even if not breaking a distance record
-            target_speed = 35.0 # knots
-            speed_error = abs((bs.traf.tas[ac_idx] * MpS2Kt) - target_speed)
-            progress_reward = -0.001 * speed_error # Very small penalty for slow flight
+        # Option 1: Give reward AND penalty (positive when closer, negative when farther)
+        progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
         
-            return progress_reward
+        # Option 2: Only give positive rewards (no penalty for moving away) - CURRENTLY ACTIVE
+        # progress_reward = max(0, distance_improvement * PROGRESS_REWARD_SCALE)
+        
+        return progress_reward
 
     def _do_action(self, actions):
         # Haal de actuele lijst van ID's op die BlueSky op DIT moment kent
@@ -1192,105 +1188,83 @@ class SectorEnv(MultiAgentEnv):
                     print(f"[COLLISION] Agents {agent_i} and {agent_j} collided at distance {distance*1852:.1f}m")
     
     def _check_proximity(self, agent_id, ac_idx):
-        """Calculate proximity penalty for getting close to other aircraft.
-        
-        This creates a "force field" effect that gently pushes agents away from each other
-        before they reach the hard intrusion boundary.
-        
-        Penalty applies in a "soft band" between INTRUSION_DISTANCE and SOFT_INTRUSION_FACTOR * INTRUSION_DISTANCE.
-        The penalty increases quadratically (squared) as agents get closer, creating smooth gradients.
-        
-        Args:
-            agent_id: The agent identifier
-            ac_idx: The aircraft index in BlueSky's traffic arrays
-            
-        Returns:
-            float: Proximity penalty (0.0 or negative value)
+        """
+        Berekent de nabijheidsstraf op basis van de actuele ID's in de simulator.
         """
         soft_thresh = SOFT_INTRUSION_FACTOR * INTRUSION_DISTANCE
-        
-        # Compute min distance to any other aircraft
-        # Use actual count of aircraft in simulation (not initial self.num_ac)
         min_dist = np.inf
-        actual_ac_count = len(bs.traf.lat)  # Get current number of aircraft
-        for i in range(actual_ac_count):
-            if i == ac_idx:
+        
+        # Gebruik de actuele lijst van ID's uit de simulator
+        active_sim_ids = bs.traf.id 
+
+        for other_id in active_sim_ids:
+            # Sla de agent zelf over
+            if other_id == agent_id:
                 continue
             
-            _, d = bs.tools.geo.kwikqdrdist(
-                bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], bs.traf.lat[i], bs.traf.lon[i]
-            )
-            min_dist = min(min_dist, d)  # Slightly faster built-in min
+            try:
+                # Haal de actuele index op voor deze specifieke indringer
+                i = bs.traf.id2idx(other_id)
+                
+                _, d = bs.tools.geo.kwikqdrdist(
+                    bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], bs.traf.lat[i], bs.traf.lon[i]
+                )
+                min_dist = min(min_dist, d)
+            except (IndexError, KeyError):
+                # Agent is waarschijnlijk net verwijderd tussen de loops door
+                continue
 
-        # Outside soft band: no shaping
+        # Berekening van de straf (alleen als we binnen de soft threshold zijn)
         if min_dist >= soft_thresh:
             return 0.0
 
-        # Calculate Ratio (0.0 = Far, 1.0 = Touching Hard Boundary)
         band = soft_thresh - INTRUSION_DISTANCE
         ratio = (soft_thresh - min_dist) / band if band > 0 else 0.0
-        
-        # Clamp at 1.0, but DON'T return 0 if inside intrusion.
-        # We want the "pain" of the soft penalty to persist on top of the hard penalty.
         ratio = np.clip(ratio, 0.0, 1.0)
 
-        # Use Square (Exponential) for the "Force Field" effect.
-        # 0.5 distance -> 0.25 pain. 0.9 distance -> 0.81 pain.
-        return PROXIMITY_MAX_PENALTY * float(ratio ** 2)
+        # Kwadratische straf voor een soepeler 'force field' effect
+        return -self.proximity_max_penalty * float(ratio ** 2)
     
     def _check_intrusion(self, agent_id, ac_idx):
-        """Return intrusion penalty for this agent on this step, and intrusion flag.
-
-        Drone pairs receive the intrusion penalty EVERY TIMESTEP they are intruding.
-        Both agents in the pair receive the penalty in the same step when they intrude.
-        
-        Uses _pairs_penalized_this_step to ensure BOTH agents get penalty in the same step,
-        preventing double-counting within a single timestep.
-        
-        Returns:
-            tuple: (step_penalty, intrusion_occurred)
-                - step_penalty: float, the penalty for intrusions (applied every timestep)
-                - intrusion_occurred: bool, True if any intrusion was detected
-        """
-        had_intrusion = False  # True if ANY intrusion detected (for info tracking)
+        had_intrusion = False
         step_penalty = 0.0
         
-        # Use actual count of aircraft in simulation (not initial self.num_ac)
-        actual_ac_count = len(bs.traf.lat)  # Get current number of aircraft
-        for i in range(actual_ac_count):
-            if i == ac_idx:
+        # Bron van waarheid: Wie is er nu in de lucht?
+        active_sim_ids = bs.traf.id 
+
+        for other_id in active_sim_ids:
+            # Sla onszelf over
+            if other_id == agent_id:
                 continue
             
-            _, int_dis = bs.tools.geo.kwikqdrdist(
-                bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], bs.traf.lat[i], bs.traf.lon[i]
-            )
-            
-            if int_dis < INTRUSION_DISTANCE:
-                had_intrusion = True  # Intrusion detected
+            try:
+                # Vraag de index van de indringer op
+                i = bs.traf.id2idx(other_id)
                 
-                # Get the other agent's ID
-                other_agent_id = self.agents[i] if i < len(self.agents) else None
-                if other_agent_id is None:
-                    continue
+                # Bereken afstand met de actuele index 'i'
+                _, int_dis = bs.tools.geo.kwikqdrdist(
+                    bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], bs.traf.lat[i], bs.traf.lon[i]
+                )
                 
-                # Create a consistent pair identifier (sorted so order doesn't matter)
-                pair = tuple(sorted([agent_id, other_agent_id]))
-                
-                # Ensure BOTH agents get the penalty in THIS step:
-                if pair in self._pairs_penalized_this_step:
-                    # Second agent of the pair - also gets penalty
-                    step_penalty += self.intrusion_penalty
-                    # Track per-agent intrusion count (only when penalty is applied)
-                    if agent_id in self._intrusions_acc:
-                        self._intrusions_acc[agent_id] += 1
-                else:
-                    # First agent of the pair - gets penalty and marks the pair for this step
-                    self._pairs_penalized_this_step.add(pair)
-                    step_penalty += self.intrusion_penalty
-                    # Count intrusion occurrences (every timestep it happens)
-                    self.total_intrusions += 1
-                    # Track per-agent intrusion count (only when penalty is applied)
-                    if agent_id in self._intrusions_acc:
-                        self._intrusions_acc[agent_id] += 1
+                if int_dis < INTRUSION_DISTANCE:
+                    had_intrusion = True
+                    pair = tuple(sorted([agent_id, other_id]))
+                    
+                    # Voorkom dubbel tellen in dezelfde stap
+                    if pair not in self._pairs_penalized_this_step:
+                        self._pairs_penalized_this_step.add(pair)
+                        step_penalty += self.intrusion_penalty
+                        self.total_intrusions += 1
+                        if agent_id in self._intrusions_acc:
+                            self._intrusions_acc[agent_id] += 1
+                    else:
+                        # Tweede agent in het paar krijgt ook de straf
+                        step_penalty += self.intrusion_penalty
+                        if agent_id in self._intrusions_acc:
+                            self._intrusions_acc[agent_id] += 1
+
+            except (IndexError, KeyError):
+                # De indringer is waarschijnlijk net verwijderd, negeer hem
+                continue
 
         return step_penalty, had_intrusion

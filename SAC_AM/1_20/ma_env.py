@@ -38,8 +38,8 @@ MAX_STEPS = 300 # max steps per episode
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 15.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 10.0  # Scale factor for distance-to-waypoint progress
+WAYPOINT_REACHED_REWARD = 20.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 15.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
 BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
@@ -290,10 +290,11 @@ class SectorEnv(MultiAgentEnv):
         terminateds = self._get_terminateds(agents_in_step)
         truncateds = self._get_truncateds(agents_in_step)
         
+        # Remove agents that terminated (waypoint) or truncated (out of bounds / time limit)
+        # Note: Collided agents are NOT in this set since they're not terminated
         agents_to_remove = {agent for agent in agents_in_step if terminateds.get(agent, False) or truncateds.get(agent, False)}
         
-        # Delete aircraft from BlueSky simulation first, before processing metrics
-        # This prevents commands being issued to deleted aircraft
+        # Delete terminated/truncated aircraft from BlueSky simulation
         for a in agents_to_remove:
             try:
                 if a in bs.traf.id:
@@ -305,6 +306,7 @@ class SectorEnv(MultiAgentEnv):
         if agents_to_remove:
             bs.sim.step()
         
+        # Process metrics and save episode data for removed agents
         for a in agents_to_remove:
             n = max(1, self._rewards_counts.get(a, 0))
             m_drift    = self._rewards_acc.get(a, {}).get("drift", 0.0)    / n
@@ -352,9 +354,11 @@ class SectorEnv(MultiAgentEnv):
             if len(self._agent_buffers[a]) >= self._flush_threshold:
                 self._flush_agent_buffer(a)
        
+        # Remove agents from active list (except collided agents who continue flying)
+        # Collided agents stay in self.agents to keep receiving actions from the model
         self.agents = [agent for agent in self.agents if agent not in agents_to_remove]
         
-        # Set __all__ to False (episode continues until no agents remain)
+        # Episode ends when all agents are done (removed or max steps reached)
         terminateds["__all__"] = len(self.agents) == 0
         truncateds["__all__"] = len(self.agents) == 0
         
@@ -483,7 +487,7 @@ class SectorEnv(MultiAgentEnv):
                 
                 rewards[agent] = (drift_reward + intrusion_reward + 
                                 progress_reward + path_efficiency_reward + 
-                                boundary_penalty + proximity_penalty + step_penalty) / 1000.0
+                                boundary_penalty + proximity_penalty + step_penalty) / 10000.0
                 
                 # accumulate for per-episode stats
                 self._rewards_acc[agent]["drift"]     += float(drift_reward)
@@ -877,9 +881,9 @@ class SectorEnv(MultiAgentEnv):
                 })
     
     def _get_terminateds(self, active_agents):
-        # Terminate agents that reached their waypoint OR collided with another aircraft
-        return {agent: (agent in self.waypoint_reached_agents or agent in self.collided_agents) 
-                for agent in active_agents}
+        # Only terminate agents that reached their waypoint
+        # Collided agents are NOT terminated - they continue flying to learn from mistakes
+        return {agent: agent in self.waypoint_reached_agents for agent in active_agents}
     
     def _get_truncateds(self, active_agents):
         truncateds = {}

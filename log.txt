@@ -121,6 +121,27 @@ attention model met trainable temperature van ppo algorithme, en wat van de rwar
 nu proberen te tunen. 
 run config2: agents gaan op hun plek circlen. 
 run config 3: minpunten als ze nog in de simulatie zitten en ze berijken niet het waypoitn aan het einde. ook is de progress reward aangepast om cirkelen niet te belonen. 
+reward_scale=0.1
+
+1_17
+reward functie van ppo pakken. ook niet doen dat aircrafts worden verwijdert. 
+
+1_19
+doen wel aan geen intrusions, maar leren geen waypoints oid
+
+1_20
+environment flink geupdate qua verwijder logica van agents. 
+Waypoint reach reward omhoog, van 15 naar 20
+progres reward scale van 10 naar 15
+alpha lr decay verandert, meot volgens gemini niet per iteration maar per step, dus dat aantal flink opgehoogd
+
+1_21
+agents worden verwijdert. het spul leert wel. alleen gaan ze niet naar waypoin toe, agents gaan zo snel mogelijk naar buiten
+boundary penalty omhoog, van -3 naar -50
+ook de progres reward wat omhoog. 
+
+start alpha mag ook wel wat omhoog voor wat meer randomheid. naar 0.25 ipv 0.2
+iets geupdate alpha values tijdens trainen
 
 ------------------------------------PPO_AM----------------------------------------
 moet helemaal nog gebeuren, maar kan je ook laten schieten
@@ -227,6 +248,11 @@ stage 2
 changes: 
 Training batch size = 64.000
 max_steps is 300
+allen circle gedrag helaas
+
+1_17_PPO
+stage 1 van 1_16_ppo
+stage 2: nieuwe check progress functie
 --------------------------------------Two_Stage_SAC -----------------------------------------
 dit werkt niet hetzelfde als PPO
 idee is om de buffer te vullen met 30% mvp data voordat de training begint. 

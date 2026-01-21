@@ -64,13 +64,13 @@ CPA_TIME_HORIZON_S = 15 # seconds
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 15.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 10.0  # Scale factor for distance-to-waypoint progress
+WAYPOINT_REACHED_REWARD = 10.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 5.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
 BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
-PROXIMITY_MAX_PENALTY = -4.0  # Maximum penalty when at hard boundary
+PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary
 
 # logging
 LOG_EVERY_N = 100  # throttle repeated warnings
@@ -1488,19 +1488,12 @@ class SectorEnv(MultiAgentEnv):
             distance_improvement = min_dist - current_dist
             self.min_distances[agent_id] = current_dist  # Update record
             
-            # Scale the progress reward 
+            # Scale the progress reward
             progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
             return progress_reward
-        
-            
-        else: # No improvement on record distance - no reward
-            # 2. Add a tiny incentive to keep moving toward the target speed 
-            # even if not breaking a distance record
-            target_speed = 35.0 # knots
-            speed_error = abs((bs.traf.tas[ac_idx] * MpS2Kt) - target_speed)
-            progress_reward = -0.001 * speed_error # Very small penalty for slow flight
-        
-            return progress_reward
+        else:
+            # No improvement on record distance - no reward
+            return 0.0
     
     def _check_path_efficiency(self, agent_id, ac_idx):
         # \"\"\"Reward for staying close to the straight-line path to waypoint.

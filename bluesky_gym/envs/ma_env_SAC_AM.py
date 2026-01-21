@@ -8,6 +8,20 @@ import bluesky_gym.envs.common.functions as fn
 import csv, os, shutil
 from collections import defaultdict 
 import time
+import sys
+from contextlib import contextmanager
+
+# Context manager to suppress BlueSky error messages
+@contextmanager
+def suppress_bluesky_errors():
+    """Temporarily redirect stderr to suppress BlueSky error messages"""
+    old_stderr = sys.stderr
+    try:
+        sys.stderr = open(os.devnull, 'w')
+        yield
+    finally:
+        sys.stderr.close()
+        sys.stderr = old_stderr
 
 N_AGENTS = 20
 
@@ -38,13 +52,14 @@ MAX_STEPS = 300 # max steps per episode
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 15.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 10.0  # Scale factor for distance-to-waypoint progress
+WAYPOINT_REACHED_REWARD = 50.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 20.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
-BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
+BOUNDARY_VIOLATION_PENALTY = -50.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
 PROXIMITY_MAX_PENALTY = -4.0  # Maximum penalty when at hard boundary
+COLLISION_PENALTY = -50.0  # One-time penalty for collision with another aircraft
 
 # constants to control actions, 
 D_HEADING = 45 # degrees
@@ -147,7 +162,8 @@ class SectorEnv(MultiAgentEnv):
         
 
         # for evaluations
-        self.total_intrusions = 0
+        self.total_intrusions = 0  # Deprecated - kept for backward compatibility
+        self.total_collisions = 0  # Track total number of collisions in this episode
         
         # Store attention weights for visualization
         self.attention_weights = {}
@@ -158,7 +174,7 @@ class SectorEnv(MultiAgentEnv):
         self._agent_steps = {}
         self._rewards_acc = {}                 # per-agent running sums during the episode
         self._rewards_counts = {}              # per-agent step counts for safe averaging
-        self._intrusions_acc = {}              # per-agent intrusion counts during the episode
+        self._collisions_acc = {}              # per-agent collision counts during the episode
                 
         # Define observation and action spaces for RLlib
         # Observation: 7 ownship features + 5 features per intruder
@@ -215,6 +231,7 @@ class SectorEnv(MultiAgentEnv):
         self.min_distances = {}  # Track minimum distance achieved per agent (for record-distance reward)
         self._penalized_pairs = set()
         self._pairs_penalized_this_step = set()
+        self.total_collisions = 0  # Reset collision counter for new episode
         
         # Reset de stap-tellers voor alle agents
         self._agent_steps = {a: 0 for a in self.agents}
@@ -222,10 +239,10 @@ class SectorEnv(MultiAgentEnv):
         # 4. Reset de belonings-accumulatoren
         self._rewards_acc = {a: {
             "drift": 0.0, "progress": 0.0, "intrusion": 0.0, 
-            "path_efficiency": 0.0, "boundary": 0.0, "step": 0.0, "proximity": 0.0
+            "path_efficiency": 0.0, "boundary": 0.0, "step": 0.0, "proximity": 0.0, "collision": 0.0
         } for a in self.agents}
         self._rewards_counts = {a: 0 for a in self.agents}
-        self._intrusions_acc = {a: 0 for a in self.agents}
+        self._collisions_acc = {a: 0 for a in self.agents}
         
         # 5. Herstel de simulator-omgeving
         self._episode_index += 1
@@ -260,51 +277,67 @@ class SectorEnv(MultiAgentEnv):
         return observations, infos
 
     def step(self, actions):
-        agents_in_step = list(self.agents)
+        # Snapshot: agents present at START of this step (for consistent termination checks)
+        agents_at_step_start = list(self.agents)
         
         # Clear the temporary buffer for this step (symmetric penalty tracking)
         self._pairs_penalized_this_step = set()
         
-        self._do_action(actions)
+        # Filter out already-collided agents from receiving actions
+        active_actions = {k: v for k, v in actions.items() if k not in self.collided_agents}
+        self._do_action(active_actions)
+        
+        # Advance simulation physics
         for _ in range(ACTION_FREQUENCY):
             bs.sim.step()
 
         if self.render_mode == "human": 
             self._render_frame()
-        for agent in agents_in_step:
+            
+        # Update step counters for all agents present at step start
+        for agent in agents_at_step_start:
             if agent in self._agent_steps:
                 self._agent_steps[agent] += 1
 
-        observations = self._get_observation(agents_in_step)
+        # CRITICAL: Check collisions BEFORE generating observations/rewards
+        # This marks collided agents and applies their one-time collision penalty
+        self._check_collisions(agents_at_step_start)
+        
+        # Generate observations/rewards for ALL agents (including newly collided ones)
+        # Newly collided agents need to receive their collision penalty as reward
+        # before being terminated
+        observations = self._get_observation(agents_at_step_start)
         self._update_obs_stats(observations)
         self._env_step += 1
         self._maybe_print_observations(observations, when="step")
-        rewards, infos = self._get_reward(agents_in_step)
+        rewards, infos = self._get_reward(agents_at_step_start)
         
-        # Note: _pairs_penalized_this_step is cleared at the start of each step
-        # This allows the same pair to be penalized again in the next timestep
+        # Determine termination/truncation for ALL agents at step start (not just active)
+        # This ensures collided agents are properly marked as terminated
+        terminateds = self._get_terminateds(agents_at_step_start)
+        truncateds = self._get_truncateds(agents_at_step_start)
         
-        # Check for collisions
-        self._check_collisions(agents_in_step)
+        # Identify agents to remove: those who terminated or truncated
+        agents_to_remove = {agent for agent in agents_at_step_start if terminateds.get(agent, False) or truncateds.get(agent, False)}
         
-        terminateds = self._get_terminateds(agents_in_step)
-        truncateds = self._get_truncateds(agents_in_step)
+        # Delete terminated/truncated aircraft from BlueSky simulation
+        # Get current BlueSky aircraft list once before deletion loop
+        current_bs_aircraft = set(bs.traf.id)
         
-        agents_to_remove = {agent for agent in agents_in_step if terminateds.get(agent, False) or truncateds.get(agent, False)}
+        with suppress_bluesky_errors():
+            for a in agents_to_remove:
+                # Only attempt deletion if aircraft exists in BlueSky right now
+                if a in current_bs_aircraft:
+                    try:
+                        bs.stack.stack(f"DEL {a}")
+                    except Exception:
+                        # Silently skip - aircraft was removed between checks
+                        pass
         
-        # Delete aircraft from BlueSky simulation first, before processing metrics
-        # This prevents commands being issued to deleted aircraft
-        for a in agents_to_remove:
-            try:
-                if a in bs.traf.id:
-                    bs.stack.stack(f"DEL {a}")
-            except Exception:
-                pass
+        # Note: Deletion commands will be processed in the next bs.sim.step() call
+        # at the start of the next step() iteration. This prevents timing issues.
         
-        # Process the deletion commands
-        if agents_to_remove:
-            bs.sim.step()
-        
+        # Process metrics and save episode data for removed agents
         for a in agents_to_remove:
             n = max(1, self._rewards_counts.get(a, 0))
             m_drift    = self._rewards_acc.get(a, {}).get("drift", 0.0)    / n
@@ -314,6 +347,7 @@ class SectorEnv(MultiAgentEnv):
             m_boundary = self._rewards_acc.get(a, {}).get("boundary", 0.0)/ n
             m_step     = self._rewards_acc.get(a, {}).get("step", 0.0)/ n
             m_proximity = self._rewards_acc.get(a, {}).get("proximity", 0.0)/ n
+            m_collision = self._rewards_acc.get(a, {}).get("collision", 0.0)/ n
 
             # increment per-agent episode index
             self._agent_episode_index[a] += 1
@@ -334,6 +368,7 @@ class SectorEnv(MultiAgentEnv):
                 "mean_reward_boundary": m_boundary,
                 "mean_reward_step": m_step,
                 "mean_reward_proximity": m_proximity,
+                "mean_reward_collision": m_collision,
                 "sum_reward_drift":     self._rewards_acc.get(a, {}).get("drift", 0.0),
                 "sum_reward_progress":  self._rewards_acc.get(a, {}).get("progress", 0.0),
                 "sum_reward_intrusion": self._rewards_acc.get(a, {}).get("intrusion", 0.0),
@@ -341,7 +376,8 @@ class SectorEnv(MultiAgentEnv):
                 "sum_reward_boundary": self._rewards_acc.get(a, {}).get("boundary", 0.0),
                 "sum_reward_step": self._rewards_acc.get(a, {}).get("step", 0.0),
                 "sum_reward_proximity": self._rewards_acc.get(a, {}).get("proximity", 0.0),
-                "total_intrusions":     self._intrusions_acc.get(a, 0),
+                "sum_reward_collision": self._rewards_acc.get(a, {}).get("collision", 0.0),
+                "total_collisions":     self._collisions_acc.get(a, 0),
                 "terminated_waypoint": waypoint_reached,  # True if agent reached waypoint
                 "terminated_collision": collided,  # True if agent collided with another aircraft
                 "truncated": truncated,  # True if episode truncated (out of bounds or time limit)
@@ -352,9 +388,11 @@ class SectorEnv(MultiAgentEnv):
             if len(self._agent_buffers[a]) >= self._flush_threshold:
                 self._flush_agent_buffer(a)
        
+        # Remove agents from active list (except collided agents who continue flying)
+        # Collided agents stay in self.agents to keep receiving actions from the model
         self.agents = [agent for agent in self.agents if agent not in agents_to_remove]
         
-        # Set __all__ to False (episode continues until no agents remain)
+        # Episode ends when all agents are done (removed or max steps reached)
         terminateds["__all__"] = len(self.agents) == 0
         truncateds["__all__"] = len(self.agents) == 0
         
@@ -420,6 +458,7 @@ class SectorEnv(MultiAgentEnv):
                     "mean_reward_boundary",
                     "mean_reward_step",
                     "mean_reward_proximity",
+                    "mean_reward_collision",
                     "sum_reward_drift",
                     "sum_reward_progress",
                     "sum_reward_intrusion",
@@ -427,7 +466,8 @@ class SectorEnv(MultiAgentEnv):
                     "sum_reward_boundary",
                     "sum_reward_step",
                     "sum_reward_proximity",
-                    "total_intrusions",
+                    "sum_reward_collision",
+                    "total_collisions",
                     "terminated_waypoint",   # True if agent reached waypoint
                     "terminated_collision",  # True if agent collided with another aircraft
                     "truncated",             # True if truncated (out of bounds/time limit)
@@ -463,6 +503,14 @@ class SectorEnv(MultiAgentEnv):
         active_sim_ids = bs.traf.id 
         
         for agent in active_agents:
+            # Special handling for collided agents: they only receive collision penalty
+            if agent in self.collided_agents:
+                # Apply collision penalty as the reward (already added to _rewards_acc in _check_collisions)
+                rewards[agent] = COLLISION_PENALTY / 100.0  # Apply same normalization
+                infos[agent]["collision"] = True
+                infos[agent]["reward_collision"] = COLLISION_PENALTY
+                continue
+            
             # CHECK: Bestaat de agent nog fysiek?
             if agent not in active_sim_ids:
                 rewards[agent] = 0.0
@@ -473,17 +521,19 @@ class SectorEnv(MultiAgentEnv):
                 ac_idx = bs.traf.id2idx(agent)
                 
                 # Voer de checks uit
-                drift_reward = self._check_drift(agent, ac_idx)
-                intrusion_reward, agent_intrusion = self._check_intrusion(agent, ac_idx)
+                # drift_reward = self._check_drift(agent, ac_idx)
+                drift_reward = 0.0 # disable for now to make simpler reward function
+                intrusion_reward, agent_intrusion = self._check_intrusion(agent, ac_idx)  # Always returns (0.0, False)
                 progress_reward = self._check_progress(agent, ac_idx)
                 path_efficiency_reward = self._check_path_efficiency(agent, ac_idx)
                 boundary_penalty = self._check_boundary_violation(agent, ac_idx)
                 proximity_penalty = self._check_proximity(agent, ac_idx)
                 step_penalty = STEP_PENALTY
+                collision_penalty = 0.0  # Collision penalty handled separately for collided agents
                 
                 rewards[agent] = (drift_reward + intrusion_reward + 
                                 progress_reward + path_efficiency_reward + 
-                                boundary_penalty + proximity_penalty + step_penalty) / 1000.0
+                                boundary_penalty + proximity_penalty + step_penalty + collision_penalty) / 100.0
                 
                 # accumulate for per-episode stats
                 self._rewards_acc[agent]["drift"]     += float(drift_reward)
@@ -493,6 +543,7 @@ class SectorEnv(MultiAgentEnv):
                 self._rewards_acc[agent]["boundary"] += float(boundary_penalty)
                 self._rewards_acc[agent]["proximity"] += float(proximity_penalty)
                 self._rewards_acc[agent]["step"] += float(step_penalty)
+                self._rewards_acc[agent]["collision"] += float(collision_penalty)
                 self._rewards_counts[agent]          += 1
                 
                 infos[agent]["reward_drift"] = drift_reward
@@ -502,7 +553,8 @@ class SectorEnv(MultiAgentEnv):
                 infos[agent]["reward_boundary"] = boundary_penalty
                 infos[agent]["reward_proximity"] = proximity_penalty
                 infos[agent]["reward_step"] = step_penalty
-                infos[agent]["intrusion"] = agent_intrusion
+                infos[agent]["reward_collision"] = collision_penalty
+                infos[agent]["collision"] = agent in self.collided_agents  # True if agent has collided
                 
             except Exception as e:
                 # Voorkom nan door een neutrale reward te geven bij een error
@@ -703,12 +755,18 @@ class SectorEnv(MultiAgentEnv):
         obs = {}
         
         # Actuele ID's in de simulator voor de intruder check
-        active_sim_ids = bs.traf.id
+        # BELANGRIJK: Filter gecrashte agents uit zodat ze niet zichtbaar zijn voor anderen
+        active_sim_ids = [agent_id for agent_id in bs.traf.id if agent_id not in self.collided_agents]
 
         for agent in active_agents:
             try:
+                # If agent has collided, they've been removed from BlueSky - return zero observation
+                if agent in self.collided_agents:
+                    obs[agent] = np.zeros(dim, dtype=np.float32)
+                    continue
+                    
                 # Controleer of de agent nog fysiek bestaat
-                if agent not in active_sim_ids:
+                if agent not in bs.traf.id:
                     obs[agent] = np.zeros(dim, dtype=np.float32)
                     continue
                     
@@ -728,6 +786,7 @@ class SectorEnv(MultiAgentEnv):
                 vy = (np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]) / 36.0
 
                 # --- 2. Build Candidate List (ID-gebaseerd) ---
+                # Alleen actieve (niet-gecrashte) agents worden meegenomen
                 candidates = []
                 for other_id in active_sim_ids:
                     if other_id == agent:
@@ -877,14 +936,24 @@ class SectorEnv(MultiAgentEnv):
                 })
     
     def _get_terminateds(self, active_agents):
-        # Terminate agents that reached their waypoint OR collided with another aircraft
+        # Terminate agents that reached their waypoint OR collided
         return {agent: (agent in self.waypoint_reached_agents or agent in self.collided_agents) 
                 for agent in active_agents}
     
     def _get_truncateds(self, active_agents):
         truncateds = {}
         for agent in active_agents:
+            # Skip agents that have collided or don't exist in BlueSky anymore
+            if agent in self.collided_agents:
+                truncateds[agent] = False
+                continue
+                
             try:
+                # Check if agent still exists in BlueSky
+                if agent not in bs.traf.id:
+                    truncateds[agent] = False
+                    continue
+                    
                 ac_idx = bs.traf.id2idx(agent)
                 outside = not bs.tools.areafilter.checkInside(
                     self.poly_name,
@@ -893,7 +962,8 @@ class SectorEnv(MultiAgentEnv):
                     np.array([ALTITUDE * FT2M]),
                 )
             except Exception:
-                outside = True
+                # If we can't check (e.g., agent was just deleted), consider it not truncated
+                outside = False
 
             hit_time_limit = self._agent_steps.get(agent, 0) >= MAX_STEPS
             truncateds[agent] = outside or hit_time_limit
@@ -936,10 +1006,10 @@ class SectorEnv(MultiAgentEnv):
 
     def _do_action(self, actions):
         # Haal de actuele lijst van ID's op die BlueSky op DIT moment kent
-        active_sim_ids = bs.traf.id 
+        active_sim_ids = set(bs.traf.id)  # Use set for O(1) lookup
         
         for agent, action in actions.items():
-            # CRITIEK: Als de agent niet fysiek in de sim bestaat, negeer de actie
+            # Skip if agent doesn't exist in BlueSky (might have just been deleted)
             if agent not in active_sim_ids:
                 continue
                 
@@ -954,9 +1024,20 @@ class SectorEnv(MultiAgentEnv):
                 heading_new = fn.bound_angle_positive_negative_180(bs.traf.hdg[ac_idx] + dh)
                 speed_new = (bs.traf.tas[ac_idx] * MpS2Kt) + dv
                 
-                # Stuur commando's
-                bs.stack.stack(f"HDG {agent} {heading_new}")
-                bs.stack.stack(f"SPD {agent} {speed_new}")
+                # Silent command execution - suppress BlueSky error messages
+                # by checking if aircraft still exists before each command
+                with suppress_bluesky_errors():
+                    if agent in bs.traf.id:
+                        try:
+                            bs.stack.stack(f"HDG {agent} {heading_new}")
+                        except Exception:
+                            pass
+                            
+                    if agent in bs.traf.id:
+                        try:
+                            bs.stack.stack(f"SPD {agent} {speed_new}")
+                        except Exception:
+                            pass
             except Exception:
                 continue
             
@@ -1151,10 +1232,14 @@ class SectorEnv(MultiAgentEnv):
             return 0.0
     
     def _check_collisions(self, active_agents):
-        """Check for collisions between aircraft and mark collided agents for termination.
+        """Check for collisions between aircraft and immediately apply collision penalty.
         
         A collision occurs when two aircraft are closer than COLLISION_DISTANCE.
-        Both aircraft in a collision are marked for termination.
+        Both aircraft in a collision:
+        - Receive an immediate one-time collision penalty
+        - Are marked for termination (terminated = True)
+        - Are removed from BlueSky simulation
+        - No longer receive actions or appear in observations
         
         Args:
             active_agents: List of currently active agent IDs
@@ -1187,9 +1272,28 @@ class SectorEnv(MultiAgentEnv):
                 
                 # Check for collision
                 if distance < COLLISION_DISTANCE:
+                    # Mark both agents as collided
                     self.collided_agents.add(agent_i)
                     self.collided_agents.add(agent_j)
-                    print(f"[COLLISION] Agents {agent_i} and {agent_j} collided at distance {distance*1852:.1f}m")
+                    
+                    # Increment episode-level collision counter
+                    self.total_collisions += 1
+                    
+                    # Apply one-time collision penalty to both agents
+                    if agent_i in self._rewards_acc:
+                        self._rewards_acc[agent_i]["collision"] += COLLISION_PENALTY
+                    if agent_j in self._rewards_acc:
+                        self._rewards_acc[agent_j]["collision"] += COLLISION_PENALTY
+                    
+                    # Increment collision counter (track number of collisions for this agent)
+                    if agent_i in self._collisions_acc:
+                        self._collisions_acc[agent_i] += 1
+                    if agent_j in self._collisions_acc:
+                        self._collisions_acc[agent_j] += 1
+                    
+                    # Collision detection works silently - metrics are logged via CSV files
+                    # Uncomment below for debugging:
+                    # print(f"[COLLISION] Agents {agent_i} and {agent_j} collided at distance {distance*1852:.1f}m")
     
     def _check_proximity(self, agent_id, ac_idx):
         """Calculate proximity penalty for getting close to other aircraft.
@@ -1239,58 +1343,15 @@ class SectorEnv(MultiAgentEnv):
         return PROXIMITY_MAX_PENALTY * float(ratio ** 2)
     
     def _check_intrusion(self, agent_id, ac_idx):
-        """Return intrusion penalty for this agent on this step, and intrusion flag.
-
-        Drone pairs receive the intrusion penalty EVERY TIMESTEP they are intruding.
-        Both agents in the pair receive the penalty in the same step when they intrude.
+        """Intrusion penalty is DISABLED - collision handling at 100m replaced this.
         
-        Uses _pairs_penalized_this_step to ensure BOTH agents get penalty in the same step,
-        preventing double-counting within a single timestep.
+        Collision penalty is now applied as a one-time penalty at 100m distance,
+        after which agents are immediately terminated and removed.
+        
+        This function is kept for backward compatibility with metrics/logging.
         
         Returns:
-            tuple: (step_penalty, intrusion_occurred)
-                - step_penalty: float, the penalty for intrusions (applied every timestep)
-                - intrusion_occurred: bool, True if any intrusion was detected
+            tuple: (0.0, False) - no intrusion penalty
         """
-        had_intrusion = False  # True if ANY intrusion detected (for info tracking)
-        step_penalty = 0.0
-        
-        # Use actual count of aircraft in simulation (not initial self.num_ac)
-        actual_ac_count = len(bs.traf.lat)  # Get current number of aircraft
-        for i in range(actual_ac_count):
-            if i == ac_idx:
-                continue
-            
-            _, int_dis = bs.tools.geo.kwikqdrdist(
-                bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], bs.traf.lat[i], bs.traf.lon[i]
-            )
-            
-            if int_dis < INTRUSION_DISTANCE:
-                had_intrusion = True  # Intrusion detected
-                
-                # Get the other agent's ID
-                other_agent_id = self.agents[i] if i < len(self.agents) else None
-                if other_agent_id is None:
-                    continue
-                
-                # Create a consistent pair identifier (sorted so order doesn't matter)
-                pair = tuple(sorted([agent_id, other_agent_id]))
-                
-                # Ensure BOTH agents get the penalty in THIS step:
-                if pair in self._pairs_penalized_this_step:
-                    # Second agent of the pair - also gets penalty
-                    step_penalty += self.intrusion_penalty
-                    # Track per-agent intrusion count (only when penalty is applied)
-                    if agent_id in self._intrusions_acc:
-                        self._intrusions_acc[agent_id] += 1
-                else:
-                    # First agent of the pair - gets penalty and marks the pair for this step
-                    self._pairs_penalized_this_step.add(pair)
-                    step_penalty += self.intrusion_penalty
-                    # Count intrusion occurrences (every timestep it happens)
-                    self.total_intrusions += 1
-                    # Track per-agent intrusion count (only when penalty is applied)
-                    if agent_id in self._intrusions_acc:
-                        self._intrusions_acc[agent_id] += 1
-
-        return step_penalty, had_intrusion
+        # Intrusion penalty disabled - collision handling takes over at 100m
+        return 0.0, False

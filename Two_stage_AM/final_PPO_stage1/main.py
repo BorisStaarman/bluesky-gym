@@ -107,10 +107,10 @@ class MVPDataBridgeCallback(DefaultCallbacks):
 N_AGENTS = 20  # Number of agents for training
 
 # --- STAGE CONTROL ---
-RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
+RUN_STAGE_2 = False  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
 
 # --- STAGE 1: IMITATION LEARNING (PPO with custom loss) ---
-iterations_stage1 = 80  # Number of iterations for Stage 1 imitation learning
+iterations_stage1 = 100  # Number of iterations for Stage 1 imitation learning
 
 # --- WARM-UP PHASE SETTINGS ---
 WARMUP_ITERATIONS = 10  # Number of iterations to warm up critic with frozen policy and attention
@@ -489,7 +489,28 @@ def _write_eval_row(metrics: dict, iteration: int, out_dir: str):
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "evaluation_progress.csv")
     import csv
+    import numpy as np
     write_header = not os.path.exists(path)
+    
+    # Calculate IQR for intrusions and waypoint rate
+    intrusions_data = metrics.get("per_episode_intrusions", [])
+    waypoints_data = metrics.get("per_episode_waypoints", [])
+    n_episodes = len(intrusions_data)
+    n_agents = 20  # Adjust if different
+    
+    # Calculate percentiles for intrusions
+    intr_q25 = np.percentile(intrusions_data, 25) if intrusions_data else 0
+    intr_q75 = np.percentile(intrusions_data, 75) if intrusions_data else 0
+    
+    # Calculate percentiles for waypoint rate (per episode)
+    if waypoints_data and n_episodes > 0:
+        waypoint_rates = [w / n_agents * 100 for w in waypoints_data]  # Convert to %
+        wp_q25 = np.percentile(waypoint_rates, 25)
+        wp_q75 = np.percentile(waypoint_rates, 75)
+    else:
+        wp_q25 = 0
+        wp_q75 = 0
+    
     with open(path, "a", newline="") as f:
         w = csv.DictWriter(
             f,
@@ -498,7 +519,11 @@ def _write_eval_row(metrics: dict, iteration: int, out_dir: str):
                 "avg_reward",
                 "avg_length",
                 "avg_intrusions",
+                "intrusions_q25",
+                "intrusions_q75",
                 "waypoint_rate",
+                "waypoint_q25",
+                "waypoint_q75",
             ],
         )
         if write_header:
@@ -509,7 +534,11 @@ def _write_eval_row(metrics: dict, iteration: int, out_dir: str):
                 "avg_reward": round(metrics["avg_reward"], 3),
                 "avg_length": round(metrics["avg_length"], 2),
                 "avg_intrusions": round(metrics["avg_intrusions"], 2),
+                "intrusions_q25": round(intr_q25, 2),
+                "intrusions_q75": round(intr_q75, 2),
                 "waypoint_rate": round(metrics["waypoint_rate"], 4),
+                "waypoint_q25": round(wp_q25, 2),
+                "waypoint_q75": round(wp_q75, 2),
             }
         )
 
@@ -534,7 +563,7 @@ if __name__ == "__main__":
     # and if we actually want to run stage 1.
     
     stage1_checkpoint = os.path.join(CHECKPOINT_DIR, "stage1_best_weights")
-    run_stage1 = False
+    run_stage1 = True
     restored_from = None  # Initialize to None - will be set if checkpoint found or Stage 1 runs
     
     # Check if we are trying to resume a Stage 2 run
