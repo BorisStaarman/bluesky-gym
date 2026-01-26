@@ -35,8 +35,8 @@ NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
 MAX_STEPS = 300 # max steps per episode
 
 # =========================== REWARD PENALTIES PARAMETERS ===========================
-STEP_PENALTY = -0.01  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
-INTRUSION_PENALTY = -3.0  # Separation violation - penalty applied every timestep during intrusion
+STEP_PENALTY = -0.02  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
+INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
 WAYPOINT_REACHED_REWARD = 500.0  # Reward for reaching waypoint
 
 # boeie
@@ -349,12 +349,6 @@ class SectorEnv(MultiAgentEnv):
         
         # Flush buffers and write stats when all agents are done
         if len(self.agents) == 0:
-            # Add episode-level metrics to infos for RLlib to aggregate
-            infos["__common__"] = {
-                "waypoint_rate": len(self.waypoint_reached_agents) / self.num_ac if self.num_ac > 0 else 0.0,
-                "intrusions": float(self.total_intrusions),
-            }
-            
             # optional: print a compact obs stats summary for this run so far
             if self._print_obs_stats_per_episode:
                 self._print_obs_stats_summary()

@@ -35,8 +35,8 @@ NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
 MAX_STEPS = 300 # max steps per episode
 
 # =========================== REWARD PENALTIES PARAMETERS ===========================
-STEP_PENALTY = -0.01  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
-INTRUSION_PENALTY = -3.0  # Separation violation - penalty applied every timestep during intrusion
+STEP_PENALTY = -0.02  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
+INTRUSION_PENALTY = -10.0  # Separation violation - penalty applied every timestep during intrusion
 WAYPOINT_REACHED_REWARD = 500.0  # Reward for reaching waypoint
 
 # boeie

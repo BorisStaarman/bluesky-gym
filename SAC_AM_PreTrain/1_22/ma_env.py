@@ -22,7 +22,7 @@ AC_SPD = 9 # starting speed, in m/s !
 AC_TYPE = "M600"
 INTRUSION_DISTANCE = 1 / 1852 * 100  # was 0.054
 MIN_SPAWN_SEPARATION_NM = 1 / 1852 * 125  # dit is iets van 125 meter
-COLLISION_DISTANCE = 1 / 1852 * 100  # 100 meters - collision threshold (DISABLED - for metrics only, no termination)
+COLLISION_DISTANCE = 1 / 1852 * 100  # 100 meters - collision threshold (terminates both aircraft)
 
 # conversion factors
 NM2KM = 1.852
@@ -35,17 +35,15 @@ NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
 MAX_STEPS = 300 # max steps per episode
 
 # =========================== REWARD PENALTIES PARAMETERS ===========================
-STEP_PENALTY = -0.01  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
-INTRUSION_PENALTY = -3.0  # Separation violation - penalty applied every timestep during intrusion
-WAYPOINT_REACHED_REWARD = 500.0  # Reward for reaching waypoint
-
-# boeie
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
+STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-PROGRESS_REWARD_SCALE = 10.0  # Scale factor for distance-to-waypoint progress
+WAYPOINT_REACHED_REWARD = 20.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 15.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
 BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
+INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
 PROXIMITY_MAX_PENALTY = -4.0  # Maximum penalty when at hard boundary
 
 # constants to control actions, 
@@ -223,7 +221,8 @@ class SectorEnv(MultiAgentEnv):
         
         # 4. Reset de belonings-accumulatoren
         self._rewards_acc = {a: {
-            "progress": 0.0, "intrusion": 0.0, "step": 0.0
+            "drift": 0.0, "progress": 0.0, "intrusion": 0.0, 
+            "path_efficiency": 0.0, "boundary": 0.0, "step": 0.0, "proximity": 0.0
         } for a in self.agents}
         self._rewards_counts = {a: 0 for a in self.agents}
         self._intrusions_acc = {a: 0 for a in self.agents}
@@ -285,16 +284,17 @@ class SectorEnv(MultiAgentEnv):
         # Note: _pairs_penalized_this_step is cleared at the start of each step
         # This allows the same pair to be penalized again in the next timestep
         
-        # Check for collisions - DISABLED: aircraft now stay alive after collision
-        # self._check_collisions(agents_in_step)
+        # Check for collisions
+        self._check_collisions(agents_in_step)
         
         terminateds = self._get_terminateds(agents_in_step)
         truncateds = self._get_truncateds(agents_in_step)
         
+        # Remove agents that terminated (waypoint) or truncated (out of bounds / time limit)
+        # Note: Collided agents are NOT in this set since they're not terminated
         agents_to_remove = {agent for agent in agents_in_step if terminateds.get(agent, False) or truncateds.get(agent, False)}
         
-        # Delete aircraft from BlueSky simulation first, before processing metrics
-        # This prevents commands being issued to deleted aircraft
+        # Delete terminated/truncated aircraft from BlueSky simulation
         for a in agents_to_remove:
             try:
                 if a in bs.traf.id:
@@ -306,11 +306,16 @@ class SectorEnv(MultiAgentEnv):
         if agents_to_remove:
             bs.sim.step()
         
+        # Process metrics and save episode data for removed agents
         for a in agents_to_remove:
             n = max(1, self._rewards_counts.get(a, 0))
+            m_drift    = self._rewards_acc.get(a, {}).get("drift", 0.0)    / n
             m_progress = self._rewards_acc.get(a, {}).get("progress", 0.0) / n
             m_intr     = self._rewards_acc.get(a, {}).get("intrusion", 0.0)/ n
+            m_path_eff = self._rewards_acc.get(a, {}).get("path_efficiency", 0.0)/ n
+            m_boundary = self._rewards_acc.get(a, {}).get("boundary", 0.0)/ n
             m_step     = self._rewards_acc.get(a, {}).get("step", 0.0)/ n
+            m_proximity = self._rewards_acc.get(a, {}).get("proximity", 0.0)/ n
 
             # increment per-agent episode index
             self._agent_episode_index[a] += 1
@@ -324,12 +329,20 @@ class SectorEnv(MultiAgentEnv):
             self._agent_buffers[a].append({
                 "episode_index": self._agent_episode_index[a],
                 "steps": self._agent_steps.get(a, 0),
+                "mean_reward_drift":    m_drift,
                 "mean_reward_progress": m_progress,
                 "mean_reward_intrusion":m_intr,
+                "mean_reward_path_efficiency": m_path_eff,
+                "mean_reward_boundary": m_boundary,
                 "mean_reward_step": m_step,
+                "mean_reward_proximity": m_proximity,
+                "sum_reward_drift":     self._rewards_acc.get(a, {}).get("drift", 0.0),
                 "sum_reward_progress":  self._rewards_acc.get(a, {}).get("progress", 0.0),
                 "sum_reward_intrusion": self._rewards_acc.get(a, {}).get("intrusion", 0.0),
+                "sum_reward_path_efficiency": self._rewards_acc.get(a, {}).get("path_efficiency", 0.0),
+                "sum_reward_boundary": self._rewards_acc.get(a, {}).get("boundary", 0.0),
                 "sum_reward_step": self._rewards_acc.get(a, {}).get("step", 0.0),
+                "sum_reward_proximity": self._rewards_acc.get(a, {}).get("proximity", 0.0),
                 "total_intrusions":     self._intrusions_acc.get(a, 0),
                 "terminated_waypoint": waypoint_reached,  # True if agent reached waypoint
                 "terminated_collision": collided,  # True if agent collided with another aircraft
@@ -341,20 +354,16 @@ class SectorEnv(MultiAgentEnv):
             if len(self._agent_buffers[a]) >= self._flush_threshold:
                 self._flush_agent_buffer(a)
        
+        # Remove agents from active list (except collided agents who continue flying)
+        # Collided agents stay in self.agents to keep receiving actions from the model
         self.agents = [agent for agent in self.agents if agent not in agents_to_remove]
         
-        # Set __all__ to False (episode continues until no agents remain)
+        # Episode ends when all agents are done (removed or max steps reached)
         terminateds["__all__"] = len(self.agents) == 0
         truncateds["__all__"] = len(self.agents) == 0
         
         # Flush buffers and write stats when all agents are done
         if len(self.agents) == 0:
-            # Add episode-level metrics to infos for RLlib to aggregate
-            infos["__common__"] = {
-                "waypoint_rate": len(self.waypoint_reached_agents) / self.num_ac if self.num_ac > 0 else 0.0,
-                "intrusions": float(self.total_intrusions),
-            }
-            
             # optional: print a compact obs stats summary for this run so far
             if self._print_obs_stats_per_episode:
                 self._print_obs_stats_summary()
@@ -408,12 +417,20 @@ class SectorEnv(MultiAgentEnv):
                 fieldnames=[
                     "episode_index",    # monotonically increasing per agent
                     "steps",
+                    "mean_reward_drift",
                     "mean_reward_progress",
                     "mean_reward_intrusion",
+                    "mean_reward_path_efficiency",
+                    "mean_reward_boundary",
                     "mean_reward_step",
+                    "mean_reward_proximity",
+                    "sum_reward_drift",
                     "sum_reward_progress",
                     "sum_reward_intrusion",
+                    "sum_reward_path_efficiency",
+                    "sum_reward_boundary",
                     "sum_reward_step",
+                    "sum_reward_proximity",
                     "total_intrusions",
                     "terminated_waypoint",   # True if agent reached waypoint
                     "terminated_collision",  # True if agent collided with another aircraft
@@ -459,24 +476,36 @@ class SectorEnv(MultiAgentEnv):
                 # Haal de ALTIJD actuele index op
                 ac_idx = bs.traf.id2idx(agent)
                 
-                # Calculate only the reward components we're using
+                # Voer de checks uit
+                drift_reward = self._check_drift(agent, ac_idx)
                 intrusion_reward, agent_intrusion = self._check_intrusion(agent, ac_idx)
                 progress_reward = self._check_progress(agent, ac_idx)
+                path_efficiency_reward = self._check_path_efficiency(agent, ac_idx)
+                boundary_penalty = self._check_boundary_violation(agent, ac_idx)
+                proximity_penalty = self._check_proximity(agent, ac_idx)
                 step_penalty = STEP_PENALTY
                 
                 # rewards[agent] = (drift_reward + intrusion_reward + 
                 #                 progress_reward + path_efficiency_reward + 
-                #                 boundary_penalty + proximity_penalty + step_penalty) / 1000.0
-                rewards[agent]  = ( intrusion_reward + step_penalty + progress_reward )/ 400.0
+                #                 boundary_penalty + proximity_penalty + step_penalty) / 10000.0
+                rewards[agent] = intrusion_reward + path_penalty # WAT ZOU DIT ZIJN
                 
                 # accumulate for per-episode stats
+                self._rewards_acc[agent]["drift"]     += float(drift_reward)
                 self._rewards_acc[agent]["progress"]  += float(progress_reward)
                 self._rewards_acc[agent]["intrusion"] += float(intrusion_reward)
+                self._rewards_acc[agent]["path_efficiency"] += float(path_efficiency_reward)
+                self._rewards_acc[agent]["boundary"] += float(boundary_penalty)
+                self._rewards_acc[agent]["proximity"] += float(proximity_penalty)
                 self._rewards_acc[agent]["step"] += float(step_penalty)
                 self._rewards_counts[agent]          += 1
                 
+                infos[agent]["reward_drift"] = drift_reward
                 infos[agent]["reward_intrusion"] = intrusion_reward
                 infos[agent]["reward_progress"] = progress_reward
+                infos[agent]["reward_path_efficiency"] = path_efficiency_reward
+                infos[agent]["reward_boundary"] = boundary_penalty
+                infos[agent]["reward_proximity"] = proximity_penalty
                 infos[agent]["reward_step"] = step_penalty
                 infos[agent]["intrusion"] = agent_intrusion
                 
@@ -853,9 +882,9 @@ class SectorEnv(MultiAgentEnv):
                 })
     
     def _get_terminateds(self, active_agents):
-        # Terminate agents that reached their waypoint only (collision termination disabled)
-        return {agent: (agent in self.waypoint_reached_agents) 
-                for agent in active_agents}
+        # Only terminate agents that reached their waypoint
+        # Collided agents are NOT terminated - they continue flying to learn from mistakes
+        return {agent: agent in self.waypoint_reached_agents for agent in active_agents}
     
     def _get_truncateds(self, active_agents):
         truncateds = {}
@@ -887,31 +916,28 @@ class SectorEnv(MultiAgentEnv):
             else:
                 return 0.0
         
-        # Not yet at waypoint - no reward
-        return 0.0
+        # Record-Distance Reward (Potential Based):
+        # Only reward the agent if it achieves a new record (closer than ever before)
+        min_dist = self.min_distances.get(agent_id, current_dist)
         
-        # # Record-Distance Reward (Potential Based):
-        # # Only reward the agent if it achieves a new record (closer than ever before)
-        # min_dist = self.min_distances.get(agent_id, current_dist)
-        
-        # if current_dist < min_dist:
-        #     # New record! Calculate improvement from previous record
-        #     distance_improvement = min_dist - current_dist
-        #     self.min_distances[agent_id] = current_dist  # Update record
+        if current_dist < min_dist:
+            # New record! Calculate improvement from previous record
+            distance_improvement = min_dist - current_dist
+            self.min_distances[agent_id] = current_dist  # Update record
             
-        #     # Scale the progress reward 
-        #     progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
-        #     return progress_reward
+            # Scale the progress reward 
+            progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
+            return progress_reward
         
             
-        # else: # No improvement on record distance - no reward
-        #     # 2. Add a tiny incentive to keep moving toward the target speed 
-        #     # even if not breaking a distance record
-        #     target_speed = 35.0 # knots
-        #     speed_error = abs((bs.traf.tas[ac_idx] * MpS2Kt) - target_speed)
-        #     progress_reward = -0.001 * speed_error # Very small penalty for slow flight
+        else: # No improvement on record distance - no reward
+            # 2. Add a tiny incentive to keep moving toward the target speed 
+            # even if not breaking a distance record
+            target_speed = 35.0 # knots
+            speed_error = abs((bs.traf.tas[ac_idx] * MpS2Kt) - target_speed)
+            progress_reward = -0.001 * speed_error # Very small penalty for slow flight
         
-        #     return progress_reward
+            return progress_reward
 
     def _do_action(self, actions):
         # Haal de actuele lijst van ID's op die BlueSky op DIT moment kent
@@ -1227,12 +1253,12 @@ class SectorEnv(MultiAgentEnv):
         preventing double-counting within a single timestep.
         
         Returns:
-            tuple: (intrusion_penalty_total, intrusion_occurred)
-                - intrusion_penalty_total: float, the total intrusion penalties for this timestep
+            tuple: (step_penalty, intrusion_occurred)
+                - step_penalty: float, the penalty for intrusions (applied every timestep)
                 - intrusion_occurred: bool, True if any intrusion was detected
         """
         had_intrusion = False  # True if ANY intrusion detected (for info tracking)
-        intrusion_penalty_total = 0.0
+        step_penalty = 0.0
         
         # Use actual count of aircraft in simulation (not initial self.num_ac)
         actual_ac_count = len(bs.traf.lat)  # Get current number of aircraft
@@ -1258,18 +1284,18 @@ class SectorEnv(MultiAgentEnv):
                 # Ensure BOTH agents get the penalty in THIS step:
                 if pair in self._pairs_penalized_this_step:
                     # Second agent of the pair - also gets penalty
-                    intrusion_penalty_total += self.intrusion_penalty
+                    step_penalty += self.intrusion_penalty
                     # Track per-agent intrusion count (only when penalty is applied)
                     if agent_id in self._intrusions_acc:
                         self._intrusions_acc[agent_id] += 1
                 else:
                     # First agent of the pair - gets penalty and marks the pair for this step
                     self._pairs_penalized_this_step.add(pair)
-                    intrusion_penalty_total += self.intrusion_penalty
+                    step_penalty += self.intrusion_penalty
                     # Count intrusion occurrences (every timestep it happens)
                     self.total_intrusions += 1
                     # Track per-agent intrusion count (only when penalty is applied)
                     if agent_id in self._intrusions_acc:
                         self._intrusions_acc[agent_id] += 1
 
-        return intrusion_penalty_total, had_intrusion
+        return step_penalty, had_intrusion
