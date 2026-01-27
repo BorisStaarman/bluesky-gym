@@ -84,7 +84,7 @@ reward_cols = [
     'mean_reward_progress', 'sum_reward_progress',
     'mean_reward_intrusion', 'sum_reward_intrusion',
     'mean_reward_path_efficiency', 'sum_reward_path_efficiency',
-    'mean_reward_proximity', 'sum_reward_proximity',
+    'mean_reward_proximity', 'sum_reward_proximity',  # Old name, keep for backwards compat
     'mean_reward_boundary', 'sum_reward_boundary',
     'mean_reward_step', 'sum_reward_step',
 ]
