@@ -35,7 +35,7 @@ NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
 MAX_STEPS = 300 # max steps per episode
 
 # =========================== REWARD PENALTIES PARAMETERS ===========================
-STEP_PENALTY = -0.05  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
+STEP_PENALTY = -0.01  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
 INTRUSION_PENALTY = -40.0  # Separation violation - penalty applied every timestep during intrusion
 WAYPOINT_REACHED_REWARD = 500.0  # Reward for reaching waypoint
 BOUNDARY_VIOLATION_PENALTY = -500.0  # Penalty for leaving polygon boundary (not at waypoint)
@@ -483,7 +483,7 @@ class SectorEnv(MultiAgentEnv):
                 
                 # Total reward now includes proximity penalty
                 # Scaling: /400 gives good gradient signals (waypoint reward ~0.25, intrusion penalty ~-0.05 per step)
-                rewards[agent]  = ( intrusion_reward + step_penalty + progress_reward + proximity_penalty + boundary_penalty )/ 200.0
+                rewards[agent]  = ( intrusion_reward + step_penalty + progress_reward + proximity_penalty + boundary_penalty )/ 400.0
                 
                 # accumulate for per-episode stats
                 self._rewards_acc[agent]["progress"]  += float(progress_reward)

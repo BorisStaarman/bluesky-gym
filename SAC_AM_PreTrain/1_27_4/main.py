@@ -21,7 +21,7 @@ from ray.rllib.algorithms.sac import SACConfig
 
 from ray.rllib.models import ModelCatalog
 # from attention_model_M import AttentionSACModel # Multiplicative method
-from attention_model_A2 import AttentionSACModel # additive method
+from attention_model_A import AttentionSACModel # additive method
 
 # Make sure these imports point to your custom environment registration
 from bluesky_gym.envs.ma_env_SAC_AM import SectorEnv
@@ -40,13 +40,13 @@ ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
 
 # --- Parameters ---
 N_AGENTS = 20  # Number of agents for training
-TOTAL_ITERS = 12000   # 18000 Maximum total iterations
+TOTAL_ITERS = 6000   # 18000 Maximum total iterations
 EXTRA_ITERS = 50           # When resuming, run this many more iterations
 FORCE_RETRAIN = True       # Start fresh with new hyperparameters
 # Optional: Only useful if you want periodic checkpoints mid-training.
 EVALUATION_INTERVAL = 1000  # e.g., set to 1 or 5 to save during training
 
-START_ALPHA = 0.15  # Initial alpha value for SAC entropy term
+START_ALPHA = 0.10  # Initial alpha value for SAC entropy term
 
 # IMPORTNAT PARAMETERS FOR PRETRAINING AND BURN-IN
 PRETRAIN_EPISODES = 150 # 150
@@ -55,8 +55,7 @@ BURN_IN_ITERATIONS = 2000     # 2000 Number of gradient steps on expert data onl
 # --- Expert Mixing Parameters (Linear Decay) ---
 EXPERT_MIX_START = 0.30        # Start with 30% expert data at iteration 0
 EXPERT_MIX_END = 0.0           # End with 0% expert data
-EXPERT_MIX_DECAY_UNTIL = 0.75  # Decay to 0% by 75% of total iterations (9000/12000)
-
+EXPERT_MIX_DECAY_UNTIL = 0.75  # Decay to 0% by 75% of total iterations (375/500)
 
 # --- Burn-in Phase Parameters (Offline Learning from Expert Buffer) ---
 BURN_IN_BATCH_SIZE = 4096     # Batch size for burn-in sampling
@@ -80,6 +79,9 @@ METRICS_DIR = os.path.join(script_dir, "metrics")
 # --- Path for model ---
 CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac")
 
+# --- Expert Buffer Storage (for mixing during training) ---
+expert_buffer_storage = []  # Global list to store expert demonstrations separately
+
 class ForceAlphaCallback(DefaultCallbacks):
     def __init__(self):
         super().__init__()
@@ -91,10 +93,10 @@ class ForceAlphaCallback(DefaultCallbacks):
         episode = kwargs.get("episode") or (len(args) > 3 and args[3])
         worker = kwargs.get("worker")
         
-        if episode is None:
-            if self.episode_count <= 3:
-                print(f"   [Callback Debug {self.episode_count}] episode is None")
-            return
+        # if episode is None:
+        #     if self.episode_count <= 3:
+        #         print(f"   [Callback Debug {self.episode_count}] episode is None")
+        #     return
         
         # Try to access environment from worker
         env = None
@@ -118,46 +120,63 @@ class ForceAlphaCallback(DefaultCallbacks):
             waypoint_rate = waypoints_reached / n_agents if n_agents > 0 else 0.0
             
             # Debug output for first few episodes
-            if self.episode_count <= 3:
-                print(f"   [Callback Debug {self.episode_count}] WP: {waypoint_rate:.2f}, Intrusions: {total_intrusions}")
+            # if self.episode_count <= 3:
+            #     print(f"   [Callback Debug {self.episode_count}] WP: {waypoint_rate:.2f}, Intrusions: {total_intrusions}")
             
             # Log metrics using the new API
             metrics_logger = kwargs.get("metrics_logger")
             if metrics_logger is not None:
                 metrics_logger.log_value("waypoint_rate", float(waypoint_rate))
                 metrics_logger.log_value("intrusions", float(total_intrusions))
-                if self.episode_count <= 3:
-                    print(f"   [Callback Debug {self.episode_count}] Logged via metrics_logger")
+                # if self.episode_count <= 3:
+                #     print(f"   [Callback Debug {self.episode_count}] Logged via metrics_logger")
             else:
                 # Fallback for older API
                 if hasattr(episode, "custom_metrics"):
                     episode.custom_metrics["waypoint_rate"] = float(waypoint_rate)
                     episode.custom_metrics["intrusions"] = float(total_intrusions)
-                    if self.episode_count <= 3:
-                        print(f"   [Callback Debug {self.episode_count}] Logged via episode.custom_metrics")
-                else:
-                    if self.episode_count <= 3:
-                        print(f"   [Callback Debug {self.episode_count}] WARNING: No way to log metrics!")
+                    # if self.episode_count <= 3:
+                    #     print(f"   [Callback Debug {self.episode_count}] Logged via episode.custom_metrics")
+                # else:
+                #     if self.episode_count <= 3:
+                #         print(f"   [Callback Debug {self.episode_count}] WARNING: No way to log metrics!")
     
     def on_train_result(self, *, algorithm, result, **kwargs):
         current_iter = result["training_iteration"]
 
-        # Voor een run van 12.000
-        START_ALPHA = 0.15
-        END_ALPHA = 0.04
-        FREEZE_UNTIL = 500 
-        TOTAL_ITERS_VAL = 12000  # <--- Verlengd naar 12k
+        # Nieuwe instellingen voor Run 7
+        START_ALPHA = 0.06
+        END_ALPHA = 0.01         # Lager eindpunt voor maximale precisie
+        FREEZE_UNTIL = 1000 
+        DECAY_UNTIL = 3000       # Veel sneller zakken (niet pas bij 6000)
         
         if current_iter < FREEZE_UNTIL:
             target_alpha = START_ALPHA
+        elif current_iter > DECAY_UNTIL:
+            target_alpha = END_ALPHA
         else:
-            decay_steps = TOTAL_ITERS_VAL - FREEZE_UNTIL
-            progress = min(1.0, (current_iter - FREEZE_UNTIL) / decay_steps)
-            target_alpha = START_ALPHA * (END_ALPHA / START_ALPHA) ** progress  
+            # Exponentieel verval tussen 1000 en 3500
+            decay_steps = DECAY_UNTIL - FREEZE_UNTIL
+            progress = (current_iter - FREEZE_UNTIL) / decay_steps
+            target_alpha = START_ALPHA * (END_ALPHA / START_ALPHA) ** progress
+        # # Voor een run van 12.000
+        # START_ALPHA = 0.15
+        # END_ALPHA = 0.04
+        # FREEZE_UNTIL = 1000 
+        # TOTAL_ITERS_VAL = 6000  # <--- Verlengd naar 12k
+        
+        # if current_iter < FREEZE_UNTIL:
+        #     target_alpha = START_ALPHA
+        # else:
+        #     decay_steps = TOTAL_ITERS_VAL - FREEZE_UNTIL
+        #     progress = min(1.0, (current_iter - FREEZE_UNTIL) / decay_steps)
+        #     target_alpha = START_ALPHA * (END_ALPHA / START_ALPHA) ** progress  
 
         # 3. Apply the force (Same logic as before)
         target_log_alpha = np.log(target_alpha)
         policy = algorithm.get_policy("shared_policy")
+        
+        
         
         alpha_param = None
         if hasattr(policy, "model") and hasattr(policy.model, "log_alpha"):
@@ -256,22 +275,8 @@ class SACExpert:
         except Exception:
             return np.array([0.0, 0.0], dtype=np.float32)
 
-# Global expert buffer to store expert demonstrations separately
-expert_buffer_storage = []
-
-def prefill_sac_buffer(algo, n_episodes=30, store_expert_separate=True):
-    """
-    Pre-fill the SAC replay buffer with expert demonstrations.
-    
-    Args:
-        algo: The SAC algorithm instance
-        n_episodes: Number of expert episodes to collect
-        store_expert_separate: If True, also stores expert data in a separate buffer for mixing
-    """
+def prefill_sac_buffer(algo, n_episodes=30):
     print(f"\n🚀 Start Buffer Pre-fill met {n_episodes} expert episodes...")
-    global expert_buffer_storage
-    expert_buffer_storage = []  # Clear any previous expert data
-    
     expert = SACExpert()
     # Maak lokale omgeving aan om data te genereren
     env = SectorEnv(n_agents=20, run_id="prefill") 
@@ -328,9 +333,8 @@ def prefill_sac_buffer(algo, n_episodes=30, store_expert_separate=True):
                 ma_batch = MultiAgentBatch({"shared_policy": batch}, env_steps=1)
                 algo.local_replay_buffer.add(ma_batch)
                 
-                # Also store in separate expert buffer if requested
-                if store_expert_separate:
-                    expert_buffer_storage.append(ma_batch)
+                # Also store in separate expert buffer for mixing during training
+                expert_buffer_storage.append(ma_batch)
                 
                 total_samples += 1
         
@@ -338,56 +342,14 @@ def prefill_sac_buffer(algo, n_episodes=30, store_expert_separate=True):
         if (ep + 1) % 10 == 0:
             print(f"   Episode {ep+1}/{n_episodes} | Samples: {total_samples} | Avg WP: {waypoints_hit/(ep+1):.2f}")
             
-    # --- VERIFY: analyze reward stats from the freshly collected expert buffer ---
-    # Gather rewards from stored MultiAgentBatches (policy 'shared_policy')
-    all_rewards = []
-    for ma in expert_buffer_storage:
-        try:
-            sb = ma.policy_batches.get("shared_policy")
-            if sb is None:
-                continue
-            r = sb.get(SampleBatch.REWARDS, None)
-            if r is None:
-                continue
-            arr = np.asarray(r, dtype=float).ravel()
-            if arr.size > 0:
-                all_rewards.extend(arr.tolist())
-        except Exception:
-            continue
-
-    if len(all_rewards) > 0:
-        rew_arr = np.asarray(all_rewards, dtype=float)
-        avg_reward = float(np.mean(rew_arr))
-        min_reward = float(np.min(rew_arr))
-        max_reward = float(np.max(rew_arr))
-        max_abs = float(np.max(np.abs(rew_arr)))
-
-        print(f"✅ Buffer gevuld met {total_samples} samples.")
-        print(f"   Expert WP Success Rate: {(waypoints_hit/(n_episodes*20))*100:.1f}%")
-        if store_expert_separate:
-            print(f"   Expert buffer stored separately: {len(expert_buffer_storage)} samples for mixing")
-
-        # Print reward statistics and give guidance
-        print(f"   [VERIFY] Expert buffer rewards — mean={avg_reward:.4f}, min={min_reward:.4f}, max={max_reward:.4f}, max_abs={max_abs:.4f}")
-
-        # Detect likely mis-scaled data
-        if max_abs > 100.0 or max_abs < 0.5:
-            print("   ⚠️ Waarschuwing: Expert buffer rewards lijken buiten bereik (te groot of te klein).")
-            print("      Dit betekent dat de burn-in/critic mogelijk verkeerde Q-waarden leert.")
-            print("      Opties: (1) Refill expert buffer with current env (recommended). (2) Rescale expert rewards before adding.")
-            print("      To automatically rescale old data to target max_abs=1.0, call the helper 'rescale_expert_buffer(algo, target_max=1.0)'.")
-        else:
-            try:
-                buffer_size = algo.local_replay_buffer._num_added
-                print(f"   Buffer size after pre-fill: {buffer_size}")
-            except Exception:
-                print(f"   Buffer content verified: {total_samples} samples added")
-    else:
-        # No rewards found (unexpected)
-        print(f"✅ Buffer gevuld met {total_samples} samples.")
-        print(f"   Expert WP Success Rate: {(waypoints_hit/(n_episodes*20))*100:.1f}%")
-        print("   ⚠️ Geen reward-gegevens gevonden in expert buffer — controleer SampleBatch keys.")
-
+    print(f"✅ Buffer gevuld met {total_samples} samples.")
+    print(f"   Expert WP Success Rate: {(waypoints_hit/(n_episodes*20))*100:.1f}%")
+    print(f"   Expert buffer stored separately: {len(expert_buffer_storage)} samples for mixing")
+    try:
+        buffer_size = algo.local_replay_buffer._num_added
+        print(f"   Buffer size after pre-fill: {buffer_size}")
+    except AttributeError:
+        print(f"   Buffer content verified: {total_samples} samples added")
     print()
     env.close()
 
@@ -440,7 +402,6 @@ def inject_expert_samples_before_training(algo, expert_ratio, batch_size=4096):
             algo.local_replay_buffer.add(sample)
     
     return n_expert_samples
-    
 
 def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
     print(f"\n🔥 Starting Burn-in Phase: {n_iterations} iterations on expert buffer...")
@@ -610,8 +571,8 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
             )
             
             # --- EARLY STOPPING: Gebruik smoothed waarde voor stop-conditie ---
-            if smoothed_wp >= 0.70:
-                print(f"\n🎯 Early stopping: Smoothed waypoint rate target reached!")
+            if smoothed_wp >= 0.80 and avg_intrusions <= 800.00:
+                print(f"\n🎯 Early stopping: Smoothed waypoint and intrusion rate target reached!")
                 print(f"   ✅ Current WP: {avg_wp_rate*100:.1f}%, Smoothed WP: {smoothed_wp*100:.1f}% >= 70%")
                 print(f"   Avg Intrusions: {avg_intrusions:.2f}")
                 print(f"   Stopping at iteration {i}/{n_iterations}")
@@ -776,17 +737,37 @@ def verify_buffer_rewards(algo):
     
     avg_reward = np.mean(rewards)
     max_reward = np.max(rewards)
+    min_reward = np.min(rewards)
+    std_reward = np.std(rewards)
     
     print("\n🔍 BUFFER REWARD VERIFICATION")
     print("-" * 30)
-    print(f"Gemiddelde beloning in buffer: {avg_reward:.4f}")
-    print(f"Hoogste beloning in buffer:    {max_reward:.4f}")
+    print(f"Gemiddelde beloning: {avg_reward:.4f}")
+    print(f"Std dev beloning:    {std_reward:.4f}")
+    print(f"Min beloning:        {min_reward:.4f}")
+    print(f"Max beloning:        {max_reward:.4f}")
     
-    if max_reward < 1.0:
-        print("⚠️ WAARSCHUWING: Je buffer bevat nog de OUDE beloningen (< 1.0).")
-        print("De Critic zal nooit naar MeanQ 1.125 stijgen met deze data.")
+    # With /400 scaling:
+    # - Perfect expert: +98/400 = +0.245
+    # - Bad episode: -2000/400 = -5.0
+    # - Typical step: -0.01/400 = -0.000025
+    # Expected range: [-5.0, +0.25] for current scaling
+    
+    # Check if rewards are in reasonable range for /400 scaling
+    if max_reward > 1.0:
+        print("⚠️ WAARSCHUWING: Max reward > 1.0 suggereert OUDE scaling (bijv. /100 of geen divisor).")
+        print("   Buffer is mogelijk gevuld met verkeerde reward schaal.")
+    elif max_reward < 0.01:
+        print("⚠️ WAARSCHUWING: Max reward < 0.01 suggereert TE KLEINE scaling (bijv. /2000).")
+        print("   Gradient signals zijn te zwak voor goede learning.")
+    elif min_reward < -10.0:
+        print("⚠️ WAARSCHUWING: Min reward < -10 suggereert extreme intrusions in buffer.")
+        print("   Expert data quality is zeer laag.")
+    elif abs(avg_reward) < 0.0001 and std_reward < 0.0001:
+        print("⚠️ WAARSCHUWING: Rewards zijn bijna allemaal ~0 - mogelijk lege/corrupte buffer.")
     else:
-        print("✅ SUCCESS: Buffer bevat de nieuwe, hogere beloningen.")
+        print("✅ SUCCESS: Buffer rewards passen bij huidige scaling (/400).")
+        print(f"   Expert data quality: {'uitstekend' if max_reward > 0.15 else 'goed' if avg_reward > -0.01 else 'matig'}")
     print("-" * 30 + "\n")
 
 def build_trainer(n_agents):
@@ -823,18 +804,21 @@ def build_trainer(n_agents):
         .callbacks(ForceAlphaCallback)
         .training(
             # LRs
-            # actor_lr=5e-5  , # was 1e-4 LR for actor, which decides the actions, small means slower learning but better converging
-            # critic_lr=1e-4, # was 5e-4          # evaluates quality of actions. hihger is better of exploration, 
+            # ⚠️ STRATEGY: Keep actor LR very low during freeze phase (iter 0-1000) 
+            # so critic can stabilize first, then gradually ramp up
+            # Note: Burn-in (2000 iters) happens BEFORE iteration 0, so doesn't affect this schedule
             actor_lr=[
-                [0, 1e-9],
-                [1000, 5e-5],           # Startwaarde
-                # [4000, 5e-5],        # Behouden tot de helft
-                [8000, 1e-6],        # Verfijnen aan het einde
+                [0, 1e-6],        # Ultra low during freeze - critic stabilizes
+                [1000, 5e-6],     # Begin gradual ramp after freeze ends
+                [1500, 2e-5],     # Increase to low-normal
+                [2500, 5e-5],     # Normal learning rate
+                [4500, 2e-5],     # Begin decay in final phase
+                [6000, 1e-5],     # Fine-tune at end
             ],
             critic_lr=[
-                [0, 3e-4],
-                [4000, 1e-4],
-                [8000, 5e-5],
+                [0, 3e-4],        # High during freeze - learns Q-values aggressively
+                [3000, 1e-4],     # Reduce after policy starts learning
+                [6000, 5e-5],     # Fine-tune at end
             ],
             
             train_batch_size=4096,
@@ -1095,45 +1079,42 @@ if __name__ == "__main__":
     else:
         algo = build_trainer(N_AGENTS)
         target_iters = int(TOTAL_ITERS)
-        
-        # --- NIEUW: VUL DE BUFFER VOORDAT DE TRAINING START ---
-        if not restored_from: # Alleen bij een verse run
-            prefill_sac_buffer(algo, n_episodes=PRETRAIN_EPISODES)
+    
+    # ⚠️ CRITICAL FIX: Always clear and refill buffer with fresh expert data
+    # This ensures reward scale matches current environment (even after checkpoint load)
+    print("\n🔄 Clearing old buffer and refilling with fresh expert data...")
+    print(f"   (Ensures reward scale matches current environment: /400.0)")
+    
+    # Clear the replay buffer completely
+    algo.local_replay_buffer._storage.clear()
+    algo.local_replay_buffer._num_added = 0
+    print("   ✅ Buffer cleared")
+    
+    # Refill with fresh expert demonstrations
+    if not restored_from:  # Only on fresh run
+        prefill_sac_buffer(algo, n_episodes=PRETRAIN_EPISODES)
+    else:  # Also refill when loading checkpoint (critical!)
+        print("   📝 Checkpoint loaded - refilling buffer with current environment")
+        prefill_sac_buffer(algo, n_episodes=PRETRAIN_EPISODES)
 
-            # --- Pre-Burn-in Evaluation (baseline before offline updates) ---
-            try:
-                print("\n🌟 Pre-Burn-in evaluation (before offline burn-in)...")
-                pre_eval_metrics = run_fixed_eval(
-                    algo,
-                    n_episodes=30,
-                    render=False,
-                    n_agents=N_AGENTS,
-                    silent=True,
-                )
-                pre_wp_pct = pre_eval_metrics.get("waypoint_rate", float("nan")) * 100.0 if pre_eval_metrics.get("waypoint_rate") is not None else float("nan")
-                print(
-                    f"[Pre-Eval] avg_rew={pre_eval_metrics['avg_reward']:.3f} | "
-                    f"avg_len={pre_eval_metrics['avg_length']:.1f} | avg_intr={pre_eval_metrics['avg_intrusions']:.2f} | "
-                    f"wp_rate={pre_wp_pct:.1f}%"
-                )
-            except Exception as e:
-                print(f"[Pre-Eval] FAILED: {e}")
+    # Pre-Burn-in evaluation disabled: removed 30-episode baseline evaluation
 
-            # --- BURN-IN: Offline learning from expert buffer only ---
-            if ENABLE_BURN_IN:
-                burn_in_results = burn_in_on_expert_buffer(
-                    algo,
-                    n_iterations=BURN_IN_ITERATIONS,
-                    batch_size=BURN_IN_BATCH_SIZE,
-                )
-                # Summarize burn-in improvements
-                try:
-                    im_init = burn_in_results.get('initial_mean_q', float('nan'))
-                    im_final = burn_in_results.get('final_mean_q', float('nan'))
-                    print(f"\n🔥 Burn-in summary: initial_mean_q={im_init:.4f} -> final_mean_q={im_final:.4f} (Δ={im_final-im_init:+.4f})")
-                except Exception:
-                    pass
-    # print
+    # --- BURN-IN: Offline learning from expert buffer only ---
+    if ENABLE_BURN_IN:
+        burn_in_results = burn_in_on_expert_buffer(
+            algo,
+            n_iterations=BURN_IN_ITERATIONS,
+            batch_size=BURN_IN_BATCH_SIZE,
+        )
+        # Summarize burn-in improvements
+        try:
+            im_init = burn_in_results.get('initial_mean_q', float('nan'))
+            im_final = burn_in_results.get('final_mean_q', float('nan'))
+            print(f"\n🔥 Burn-in summary: initial_mean_q={im_init:.4f} -> final_mean_q={im_final:.4f} (Δ={im_final-im_init:+.4f})")
+        except Exception:
+            pass
+    
+    # Buffer verification
     results_buffer_verification = verify_buffer_rewards(algo)
     print("-" * 30)
     print(f" ✅ BUFFER VERIFICATION: {results_buffer_verification}")
@@ -1221,7 +1202,7 @@ if __name__ == "__main__":
         expert_samples_injected_history.append(n_expert_injected)
         
         # Print mixing info on first few iterations and periodically
-        if i <= 5 or i % 500 == 0:
+        if i <= 5 or i % 100 == 0:
             print(f"   [Mixing] Iteration {i}: Expert ratio = {expert_ratio:.1%}, Injected {n_expert_injected} expert samples")
         
         result = algo.train()
@@ -1389,11 +1370,11 @@ if __name__ == "__main__":
                         manual_entropy = 0.5 * action_dim * (1 + np.log(2 * np.pi)) + np.sum(log_std)
                         computed_entropy = True
                         
-                        if i % 50 == 0 or i == 42:
-                            std = np.exp(log_std)
-                            print(f"   [Manual Entropy] Method 1: Gaussian H = {manual_entropy:.4f}")
-                            print(f"     log_std: {log_std}, std: {std}")
-                            print(f"     Note: True SAC entropy ≈ {manual_entropy - 0.7:.4f} (after tanh correction)")
+                        # if i % 50 == 0 or i == 42:
+                        #     std = np.exp(log_std)
+                        #     print(f"   [Manual Entropy] Method 1: Gaussian H = {manual_entropy:.4f}")
+                        #     print(f"     log_std: {log_std}, std: {std}")
+                        #     print(f"     Note: True SAC entropy ≈ {manual_entropy - 0.7:.4f} (after tanh correction)")
                 
                 # Method 2: Check policy.model directly
                 if not computed_entropy and hasattr(policy, 'model'):
@@ -1545,14 +1526,14 @@ if __name__ == "__main__":
         #   - Low R/E ratio: Agent focuses on exploration (may ignore mission)
         #   - If entropy is NaN: R/E ratio is INVALID and should be ignored
         
-        if not np.isnan(alpha) and not np.isnan(entropy) and not np.isnan(mean_rew):
-            # Weighted Entropy = α × H (the actual exploration signal)
-            weighted_entropy = alpha * entropy  # Note: entropy is typically negative
+        # Zoek deze regel in main.py (rond regel 1010)
+        if not np.isnan(alpha) and not np.isnan(entropy) and not np.isnan(mean_rew) and not np.isnan(ep_len):
+            # Bereken de TOTALE entropy bonus van de hele episode
+            total_episode_entropy = ep_len * (alpha * entropy)
             
-            # R/E Ratio = |reward| / |α × H + ε|
-            # We use abs() because both reward and entropy can be negative
-            reward_entropy_ratio = abs(mean_rew) / (abs(weighted_entropy) + 1e-6)
-            
+            # De Echte R/E Ratio (Balans over de hele vlucht)
+            reward_entropy_ratio = abs(mean_rew) / (abs(total_episode_entropy) + 1e-6)
+                    
             # Warn if weighted entropy is suspiciously small (policy collapsed)
             if abs(weighted_entropy) < 0.001 and i % 50 == 0:
                 print(f"   ⚠️  Weighted Entropy very low: {weighted_entropy:.6f} (α={alpha:.4f}, H={entropy:.4f})")
@@ -1871,16 +1852,19 @@ if __name__ == "__main__":
             'iteration', 'attention_sharpness', 
             'wq_weight_norm', 'wq_grad_norm',
             'wk_weight_norm', 'wk_grad_norm',
+            'wv_weight_norm', 'wv_grad_norm',
             'expert_mix_ratio', 'expert_samples_injected',  # New columns for expert mixing
         ])
         for idx in range(len(attention_sharpness_history)):
             writer.writerow([
                 idx + 1,
-                attention_sharpness_history[idx] if idx < len(attention_sharpness_history) else '',
-                wq_weight_norm_history[idx] if idx < len(wq_weight_norm_history) else '',
-                wq_grad_norm_history[idx] if idx < len(wq_grad_norm_history) else '',
-                wk_weight_norm_history[idx] if idx < len(wk_weight_norm_history) else '',
-                wk_grad_norm_history[idx] if idx < len(wk_grad_norm_history) else '',
+                attention_sharpness_history[idx],
+                wq_weight_norm_history[idx],
+                wq_grad_norm_history[idx],
+                wk_weight_norm_history[idx],
+                wk_grad_norm_history[idx],
+                wv_weight_norm_history[idx],
+                wv_grad_norm_history[idx],
                 expert_mix_history[idx] if idx < len(expert_mix_history) else '',
                 expert_samples_injected_history[idx] if idx < len(expert_samples_injected_history) else '',
             ])
@@ -1896,8 +1880,6 @@ if __name__ == "__main__":
         zero_idx = next((i for i, r in enumerate(expert_mix_history) if r == 0.0), len(expert_mix_history))
         if zero_idx < len(expert_mix_history):
             print(f"   • Expert mixing ended at iteration {zero_idx + 1} ({zero_idx/len(expert_mix_history)*100:.1f}% of training)")
-
-    # Final cleanup
     
     
 

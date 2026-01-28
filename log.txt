@@ -142,6 +142,61 @@ ook de progres reward wat omhoog.
 
 start alpha mag ook wel wat omhoog voor wat meer randomheid. naar 0.25 ipv 0.2
 iets geupdate alpha values tijdens trainen
+run van 18000 iteraties werkte niet. op de helft van de iteraties, nog tijdens de hoge alpha fase gingen de drones slecht gedrag vertonen. 
+
+1_22
+test run van 6000 iteraties
+PROGRESS_REWARD_SCALE = 10.0 # was 20
+colision penlaty van -50 naar -100
+step penalty naar -0.05
+dit werkt ook niet.
+
+
+------------------------------------SAC_AM_PRETRAIN----------------------------------------
+1_26
+na lange training run zit die op 70% waypoint en nog iets van 800 intrusions. op 
+de een of andere manier willen die intrusions er niet uit. 
+nu gewoon modelletje tunen op ontwijken
+
+1_27
+op nlr serer, testen welke attention model beter werkt na de buffer. lijkt erop alsof originele
+attention model gewoon beter werkt. dus 8000 iter trainin run nu op nlr server met oude 
+attention mechanism.
+
+
+1_27_2
+proximity penalty toevoegen, van ppo. als ze in de buurt komen moeten ze al penalty krijgen.
+ook voor de eerste zoveel iteraties de learning rate van de actor op 0 zetten, zodat de critic eraan kan wennen
+
+1_27_3
+...
+
+1_27_4
+deze werkt goed. deze tunen. 
+
+1_28_1
+bijhouden welk percentage van aircrafts is gecrashed, ipv het aantal crashes. in de evaluatie
+DEZE WERKT qua training sws goed. moet je vooral proberen, alleen de RE ratio is pizi laag maar weet niet hoe erg dat nou echt is. 
+the ma_env in de environment kopieren
+
+1_28_2
+grote boundary penalty toegevoegd.
+run van 3500 iteraties om te checken of t stabiel traint. 
+
+1_28_3
+Prioritized experience replay toevoegen
+intrusion reward naar -40
+step penalyt naar 0.05
+get_reward /200 ipv /400
+burn_in_lr = 7.5e-7 # ipv was 1.5e-6
+
+1_28_4
+het afbouwen van de expert mix. EXPERT_MIX_DECAY_UNTIL = 0.3 ipv 0.75
+"prioritized_replay_alpha": 0.4, #  was 0.6
+intrusion penalty weer verhogen, naar -50. # was -40
+alpha floor naar 0.04. 
+START_ALPHA = 0.09
+
 
 ------------------------------------PPO_AM----------------------------------------
 moet helemaal nog gebeuren, maar kan je ook laten schieten

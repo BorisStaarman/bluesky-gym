@@ -46,7 +46,7 @@ FORCE_RETRAIN = True       # Start fresh with new hyperparameters
 # Optional: Only useful if you want periodic checkpoints mid-training.
 EVALUATION_INTERVAL = 1000  # e.g., set to 1 or 5 to save during training
 
-START_ALPHA = 0.15  # Initial alpha value for SAC entropy term
+START_ALPHA = 0.10  # Initial alpha value for SAC entropy term
 
 # IMPORTNAT PARAMETERS FOR PRETRAINING AND BURN-IN
 PRETRAIN_EPISODES = 150 # 150
@@ -720,17 +720,37 @@ def verify_buffer_rewards(algo):
     
     avg_reward = np.mean(rewards)
     max_reward = np.max(rewards)
+    min_reward = np.min(rewards)
+    std_reward = np.std(rewards)
     
     print("\n🔍 BUFFER REWARD VERIFICATION")
     print("-" * 30)
-    print(f"Gemiddelde beloning in buffer: {avg_reward:.4f}")
-    print(f"Hoogste beloning in buffer:    {max_reward:.4f}")
+    print(f"Gemiddelde beloning: {avg_reward:.4f}")
+    print(f"Std dev beloning:    {std_reward:.4f}")
+    print(f"Min beloning:        {min_reward:.4f}")
+    print(f"Max beloning:        {max_reward:.4f}")
     
-    if max_reward < 1.0:
-        print("⚠️ WAARSCHUWING: Je buffer bevat nog de OUDE beloningen (< 1.0).")
-        print("De Critic zal nooit naar MeanQ 1.125 stijgen met deze data.")
+    # With /400 scaling:
+    # - Perfect expert: +98/400 = +0.245
+    # - Bad episode: -2000/400 = -5.0
+    # - Typical step: -0.01/400 = -0.000025
+    # Expected range: [-5.0, +0.25] for current scaling
+    
+    # Check if rewards are in reasonable range for /400 scaling
+    if max_reward > 1.0:
+        print("⚠️ WAARSCHUWING: Max reward > 1.0 suggereert OUDE scaling (bijv. /100 of geen divisor).")
+        print("   Buffer is mogelijk gevuld met verkeerde reward schaal.")
+    elif max_reward < 0.01:
+        print("⚠️ WAARSCHUWING: Max reward < 0.01 suggereert TE KLEINE scaling (bijv. /2000).")
+        print("   Gradient signals zijn te zwak voor goede learning.")
+    elif min_reward < -10.0:
+        print("⚠️ WAARSCHUWING: Min reward < -10 suggereert extreme intrusions in buffer.")
+        print("   Expert data quality is zeer laag.")
+    elif abs(avg_reward) < 0.0001 and std_reward < 0.0001:
+        print("⚠️ WAARSCHUWING: Rewards zijn bijna allemaal ~0 - mogelijk lege/corrupte buffer.")
     else:
-        print("✅ SUCCESS: Buffer bevat de nieuwe, hogere beloningen.")
+        print("✅ SUCCESS: Buffer rewards passen bij huidige scaling (/400).")
+        print(f"   Expert data quality: {'uitstekend' if max_reward > 0.15 else 'goed' if avg_reward > -0.01 else 'matig'}")
     print("-" * 30 + "\n")
 
 def build_trainer(n_agents):
@@ -1046,7 +1066,7 @@ if __name__ == "__main__":
     # ⚠️ CRITICAL FIX: Always clear and refill buffer with fresh expert data
     # This ensures reward scale matches current environment (even after checkpoint load)
     print("\n🔄 Clearing old buffer and refilling with fresh expert data...")
-    print(f"   (Ensures reward scale matches current environment: /500.0)")
+    print(f"   (Ensures reward scale matches current environment: /400.0)")
     
     # Clear the replay buffer completely
     algo.local_replay_buffer._storage.clear()
@@ -1506,14 +1526,14 @@ if __name__ == "__main__":
         #   - Low R/E ratio: Agent focuses on exploration (may ignore mission)
         #   - If entropy is NaN: R/E ratio is INVALID and should be ignored
         
-        if not np.isnan(alpha) and not np.isnan(entropy) and not np.isnan(mean_rew):
-            # Weighted Entropy = α × H (the actual exploration signal)
-            weighted_entropy = alpha * entropy  # Note: entropy is typically negative
+        # Zoek deze regel in main.py (rond regel 1010)
+        if not np.isnan(alpha) and not np.isnan(entropy) and not np.isnan(mean_rew) and not np.isnan(ep_len):
+            # Bereken de TOTALE entropy bonus van de hele episode
+            total_episode_entropy = ep_len * (alpha * entropy)
             
-            # R/E Ratio = |reward| / |α × H + ε|
-            # We use abs() because both reward and entropy can be negative
-            reward_entropy_ratio = abs(mean_rew) / (abs(weighted_entropy) + 1e-6)
-            
+            # De Echte R/E Ratio (Balans over de hele vlucht)
+            reward_entropy_ratio = abs(mean_rew) / (abs(total_episode_entropy) + 1e-6)
+                    
             # Warn if weighted entropy is suspiciously small (policy collapsed)
             if abs(weighted_entropy) < 0.001 and i % 50 == 0:
                 print(f"   ⚠️  Weighted Entropy very low: {weighted_entropy:.6f} (α={alpha:.4f}, H={entropy:.4f})")
