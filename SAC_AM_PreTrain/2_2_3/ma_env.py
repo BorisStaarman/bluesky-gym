@@ -36,7 +36,7 @@ MAX_STEPS = 300 # max steps per episode
 
 # =========================== REWARD PENALTIES PARAMETERS ===========================
 STEP_PENALTY = -0.1  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
-INTRUSION_PENALTY = -250.0  # DEZE WORDT NU DYNAMICALLY IN DE MIAN.PY AANGEGEVEN VOOR DE TRAINING. 
+INTRUSION_PENALTY = -250.0  # REDUCED from -150 for SAC stability (matches waypoint reward magnitude)
                             # Separation violation - penalty applied every timestep during intrusion
                             # SAC works best with balanced reward scales (within 10x of each other)
 WAYPOINT_REACHED_REWARD =150.0  # Reward for reaching waypoint
@@ -185,16 +185,6 @@ class SectorEnv(MultiAgentEnv):
         self.agent_waypoints = {}
         self.previous_distances = {}
         self.waypoint_reached_agents = set()
-
-    def update_intrusion_penalty(self, new_penalty: float):
-        """Update the intrusion penalty value dynamically during training.
-        
-        This allows curriculum learning where the penalty increases over time.
-        
-        Args:
-            new_penalty: New intrusion penalty value (typically negative)
-        """
-        self.intrusion_penalty = new_penalty
 
     @staticmethod
     def compute_relative_position(center, lat, lon):

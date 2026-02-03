@@ -35,20 +35,18 @@ NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
 MAX_STEPS = 300 # max steps per episode
 
 # =========================== REWARD PENALTIES PARAMETERS ===========================
-STEP_PENALTY = -0.1  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
-INTRUSION_PENALTY = -250.0  # DEZE WORDT NU DYNAMICALLY IN DE MIAN.PY AANGEGEVEN VOOR DE TRAINING. 
-                            # Separation violation - penalty applied every timestep during intrusion
-                            # SAC works best with balanced reward scales (within 10x of each other)
-WAYPOINT_REACHED_REWARD =150.0  # Reward for reaching waypoint
-BOUNDARY_VIOLATION_PENALTY = -150.0  # Penalty for leaving polygon boundary (not at waypoint)
-PROGRESS_REWARD_SCALE = 100.0  # Scale factor for distance-to-waypoint progress
-PROXIMITY_MAX_PENALTY = -60.0  # Maximum penalty when at hard boundary
-SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
-DRIFT_PENALTY = -0.03  # Small penalty for heading deviation
+STEP_PENALTY = 0.0  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
+INTRUSION_PENALTY = -40.0  # Separation violation - penalty applied every timestep during intrusion
+WAYPOINT_REACHED_REWARD = 500.0  # Reward for reaching waypoint
+BOUNDARY_VIOLATION_PENALTY = -500.0  # Penalty for leaving polygon boundary (not at waypoint)
+DRIFT_PENALTY = -5.0  # Small penalty for heading deviation
 
 # boeie
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
+PROGRESS_REWARD_SCALE = 10.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
+SOFT_INTRUSION_FACTOR = 3.0  # Soft zone starts at 1.5x the intrusion distance
+PROXIMITY_MAX_PENALTY = -10.0  # Maximum penalty when at hard boundary
 
 # constants to control actions, 
 D_HEADING = 45 # degrees
@@ -72,7 +70,7 @@ AIRSPEED_CENTER_KTS = 35.0
 AIRSPEED_SCALE_KTS = 10.0 * 3.4221
 
 # collision risk parameters
-PROTECTED_ZONE_M = 100  # meters
+PROTECTED_ZONE_M = 105  # meters
 CPA_TIME_HORIZON_S = 15 # seconds
 
 # logging
@@ -185,16 +183,6 @@ class SectorEnv(MultiAgentEnv):
         self.agent_waypoints = {}
         self.previous_distances = {}
         self.waypoint_reached_agents = set()
-
-    def update_intrusion_penalty(self, new_penalty: float):
-        """Update the intrusion penalty value dynamically during training.
-        
-        This allows curriculum learning where the penalty increases over time.
-        
-        Args:
-            new_penalty: New intrusion penalty value (typically negative)
-        """
-        self.intrusion_penalty = new_penalty
 
     @staticmethod
     def compute_relative_position(center, lat, lon):
@@ -491,12 +479,12 @@ class SectorEnv(MultiAgentEnv):
                 progress_reward = self._check_progress(agent, ac_idx)
                 proximity_penalty = self._check_proximity(agent, ac_idx)
                 boundary_penalty = self._check_boundary_violation(agent, ac_idx)
-                drift_reward = self._check_drift(agent, ac_idx)
+                drift_penalty = self._check_drift(agent, ac_idx)
                 step_penalty = STEP_PENALTY
                 
                 # Total reward now includes proximity penalty
                 # Scaling: /400 gives good gradient signals (waypoint reward ~0.25, intrusion penalty ~-0.05 per step)
-                rewards[agent]  = ( intrusion_reward + step_penalty + drift_reward + progress_reward + proximity_penalty + boundary_penalty ) / 1000.0
+                rewards[agent]  = ( intrusion_reward + step_penalty + progress_reward + drift_penalty +proximity_penalty + boundary_penalty ) / 200.0
                 
                 # accumulate for per-episode stats
                 self._rewards_acc[agent]["progress"]  += float(progress_reward)
@@ -504,6 +492,7 @@ class SectorEnv(MultiAgentEnv):
                 self._rewards_acc[agent]["proximity"] += float(proximity_penalty)
                 self._rewards_acc[agent]["step"] += float(step_penalty)
                 self._rewards_acc[agent]["boundary"] += float(boundary_penalty)
+                self._rewards_acc[agent]["drift"] += float(drift_penalty)
                 self._rewards_counts[agent]          += 1
                 
                 infos[agent]["reward_intrusion"] = intrusion_reward
@@ -512,6 +501,7 @@ class SectorEnv(MultiAgentEnv):
                 infos[agent]["reward_step"] = step_penalty
                 infos[agent]["reward_boundary"] = boundary_penalty
                 infos[agent]["intrusion"] = agent_intrusion
+                infos[agent]["drift_penalty"] = drift_penalty
                 
             except Exception as e:
                 # Voorkom nan door een neutrale reward te geven bij een error
@@ -1061,33 +1051,31 @@ class SectorEnv(MultiAgentEnv):
             else:
                 return 0.0
         
-        # VEILIGHEID: Initialiseer min_dist als die nog niet bestaat voor deze agent
-        if agent_id not in self.min_distances:
-            self.min_distances[agent_id] = current_dist
-            return 0.0
-            
-        # Record-Distance Reward (Potential Based):
-        # Only reward the agent if it achieves a new record (closer than ever before)
-        min_dist = self.min_distances.get(agent_id, current_dist)
+        # Not yet at waypoint - no reward
+        return 0.0
         
-        if current_dist < min_dist:
-            # New record! Calculate improvement from previous record
-            distance_improvement = min_dist - current_dist
-            self.min_distances[agent_id] = current_dist  # Update record
+        # # Record-Distance Reward (Potential Based):
+        # # Only reward the agent if it achieves a new record (closer than ever before)
+        # min_dist = self.min_distances.get(agent_id, current_dist)
+        
+        # if current_dist < min_dist:
+        #     # New record! Calculate improvement from previous record
+        #     distance_improvement = min_dist - current_dist
+        #     self.min_distances[agent_id] = current_dist  # Update record
             
-            # Scale the progress reward 
-            progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
-            return progress_reward
+        #     # Scale the progress reward 
+        #     progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
+        #     return progress_reward
         
             
-        else: # No improvement on record distance - no reward
-            # 2. Add a tiny incentive to keep moving toward the target speed 
-            # even if not breaking a distance record
-            target_speed = 35.0 # knots
-            speed_error = abs((bs.traf.tas[ac_idx] * MpS2Kt) - target_speed)
-            progress_reward = -0.001 * speed_error # Very small penalty for slow flight
+        # else: # No improvement on record distance - no reward
+        #     # 2. Add a tiny incentive to keep moving toward the target speed 
+        #     # even if not breaking a distance record
+        #     target_speed = 35.0 # knots
+        #     speed_error = abs((bs.traf.tas[ac_idx] * MpS2Kt) - target_speed)
+        #     progress_reward = -0.001 * speed_error # Very small penalty for slow flight
         
-            return progress_reward
+        #     return progress_reward
 
     def _do_action(self, actions):
         # Haal de actuele lijst van ID's op die BlueSky op DIT moment kent
@@ -1108,6 +1096,11 @@ class SectorEnv(MultiAgentEnv):
                 # Gebruik de actuele waarden uit de sim
                 heading_new = fn.bound_angle_positive_negative_180(bs.traf.hdg[ac_idx] + dh)
                 speed_new = (bs.traf.tas[ac_idx] * MpS2Kt) + dv
+                
+                MIN_SPEED_KT = 10.0
+                MAX_SPEED_KT = 35.0
+                # set a minimum and maximum speed
+                speed_new = max(MIN_SPEED_KT, min(MAX_SPEED_KT, speed_new))
                 
                 # Stuur commando's
                 bs.stack.stack(f"HDG {agent} {heading_new}")

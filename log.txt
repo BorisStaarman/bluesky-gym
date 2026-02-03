@@ -190,7 +190,7 @@ step penalyt naar 0.05
 get_reward /200 ipv /400
 burn_in_lr = 7.5e-7 # ipv was 1.5e-6
 
-1_28_4
+1_28_4: op nlr server
 het afbouwen van de expert mix. EXPERT_MIX_DECAY_UNTIL = 0.3 ipv 0.75
 "prioritized_replay_alpha": 0.4, #  was 0.6
 intrusion penalty weer verhogen, naar -50. # was -40
