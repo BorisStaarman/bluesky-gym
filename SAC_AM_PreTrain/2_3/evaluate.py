@@ -123,6 +123,7 @@ if __name__ == "__main__":
     print(f"   {CHECKPOINT_DIR}\n")
 
     # --- Modify checkpoint config to reduce resource requirements ---
+    CHECKPOINT_DIR = 'C:\\Users\\boris\\Documents\\bsgym\\bluesky-gym\\SAC_AM_PreTrain\\2_3\\models\\sectorcr_ma_sac\\best_iter_13676'
     checkpoint_config_file = os.path.join(CHECKPOINT_DIR, "rllib_checkpoint.json")
     checkpoint_config_backup = os.path.join(CHECKPOINT_DIR, "rllib_checkpoint.json.backup")
     
@@ -187,12 +188,16 @@ if __name__ == "__main__":
         
         # Calculate what this means
         expected_neighbors = actor_model.num_intruders
+        actual_neighbors = N_AGENTS - 1  # Environment uses n_agents-1 neighbors
+        actual_obs_size = 7 + 5 * actual_neighbors
         print(f"\n[ANALYSIS]:")
         print(f"  - This model was trained to track {expected_neighbors} neighbors")
-        print(f"  - Current environment NUM_AC_STATE=24 (should create obs size {7 + 7*24} = 171)")
-        if expected_neighbors != 24:
-            print(f"  ⚠️  MISMATCH! Model expects {expected_neighbors} but env provides 24!")
-            print(f"  ⚠️  This model was trained with NUM_AC_STATE={expected_neighbors}, not 24")
+        print(f"  - Current environment: N_AGENTS={N_AGENTS} → {actual_neighbors} neighbors (obs size {actual_obs_size})")
+        if expected_neighbors != actual_neighbors:
+            print(f"  ⚠️  MISMATCH! Model expects {expected_neighbors} but env provides {actual_neighbors}!")
+            print(f"  ⚠️  Update N_AGENTS in evaluate.py to {expected_neighbors + 1} to match training!")
+        else:
+            print(f"  ✅ MATCH! Model and environment both use {actual_neighbors} neighbors.")
         print()
     
     env = SectorEnv(

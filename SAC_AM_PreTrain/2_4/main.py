@@ -371,17 +371,6 @@ class ForceAlphaCallback(DefaultCallbacks):
             print(f"   {stage_name}: Intrusion Penalty = {target_intrusion_penalty}")
             print(f"   Goal: {'Learn waypoint navigation' if stage_number == 1 else 'Add collision awareness' if stage_number == 2 else 'Master both skills'}\n")
         
-        # --- TRAINING SAFEGUARD: Warn if WP rate drops too low ---
-        if current_iter > 6000 and current_iter % 100 == 0:  # Check every 100 iterations after 6K
-            if wp_rate < 0.80:
-                print(f"\n⚠️  WARNING: WP rate dropped to {wp_rate*100:.1f}% at iteration {current_iter}")
-                print(f"   This is below the 80% target. Agent may be prioritizing collision avoidance over navigation.")
-                print(f"   Current intrusion penalty: {target_intrusion_penalty} (Stage {stage_number})")
-                if wp_rate < 0.50:
-                    print(f"   🚨 CRITICAL: WP rate below 50%! Consider reverting to earlier checkpoint.\n")
-                else:
-                    print()
-        
         # Get current performance metrics
         custom_metrics_top = result.get("custom_metrics", {})
         custom_metrics_env = result.get("env_runners", {}).get("custom_metrics", {})
@@ -1103,12 +1092,11 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
                         f"Temp={grad_norms['temperature']:.6f}"
                     )
             
-            # --- EARLY STOPPING: Stop when we hit 70% WP (realistic burn-in target) ---
-            if smoothed_wp >= 0.70:
-                print(f"\n🎯 Burn-in success: 70% WP threshold reached!")
-                print(f"   ✅ Current WP: {avg_wp_rate*100:.1f}%, Smoothed WP: {smoothed_wp*100:.1f}% >= 70%")
+            # --- EARLY STOPPING: Stop when we hit 80% WP (before collapse) ---
+            if smoothed_wp >= 0.80:
+                print(f"\n🎯 Early stopping: 80% WP threshold reached!")
+                print(f"   ✅ Current WP: {avg_wp_rate*100:.1f}%, Smoothed WP: {smoothed_wp*100:.1f}% >= 80%")
                 print(f"   Avg Intrusions: {avg_intrusions:.2f}")
-                print(f"   Navigation skills acquired - ready for main training!")
                 print(f"   Stopping at iteration {i}/{n_iterations}")
                 break
         elif i % 50 == 0:
@@ -1734,7 +1722,8 @@ if __name__ == "__main__":
     print("🎯 INTRUSION PENALTY CURRICULUM SCHEDULE")
     print("=" * 60)
     for i, (threshold_iter, penalty) in enumerate(INTRUSION_CURRICULUM_STAGES):
-        stage_name = ["Navigation", "Collision Awareness", "Mastery"][i]
+        stage_names = ["Navigation", "Collision Awareness", "Moderate Penalties", "Full Mastery"]
+        stage_name = stage_names[i] if i < len(stage_names) else f"Stage {i+1}"
         next_threshold = INTRUSION_CURRICULUM_STAGES[i+1][0] if i < len(INTRUSION_CURRICULUM_STAGES)-1 else target_iters
         print(f"   Stage {i+1} ({stage_name}): Iterations {threshold_iter:,}-{next_threshold:,}")
         print(f"      Intrusion Penalty: {penalty}")
@@ -1838,6 +1827,11 @@ if __name__ == "__main__":
     best_smoothed_reward = float('-inf')  # Best smoothed reward (for early stopping)
     iterations_without_improvement = 0  # Based on smoothed reward (for stopping)
     early_stop_triggered = False
+    
+    # Lowest intrusion tracking (separate from best reward)
+    lowest_intrusions = float('inf')  # Lowest intrusion count
+    lowest_intrusions_iteration = 0
+    lowest_intrusions_checkpoint_path = None
     
     # --- Main Training Loop ---
     for i in range(algo.iteration + 1, target_iters + 1):
@@ -2292,7 +2286,7 @@ if __name__ == "__main__":
             )
 
         # --- Best Checkpoint Tracking (ALWAYS ACTIVE) ---
-        # Skip saving best model for first 10 iterations (warm-up period)
+        # Skip saving best model for first 50 iterations (warm-up period)
         if i > 50 and not np.isnan(mean_rew) and mean_rew > best_reward:
             best_reward = mean_rew
             best_reward_iteration = i
@@ -2307,6 +2301,23 @@ if __name__ == "__main__":
                 best_checkpoint_path = best_checkpoint_dir
             
             print(f"   ⭐ New best reward: {best_reward:.3f} (saved to {os.path.basename(best_checkpoint_path)})")
+        
+        # --- Lowest Intrusion Checkpoint Tracking (ALWAYS ACTIVE) ---
+        # Skip saving for first 50 iterations and only if intrusions metric is valid
+        if i > 50 and not np.isnan(avg_intrusions) and avg_intrusions < lowest_intrusions:
+            lowest_intrusions = avg_intrusions
+            lowest_intrusions_iteration = i
+            
+            # Save checkpoint for new lowest intrusions
+            lowest_intr_checkpoint_dir = os.path.join(CHECKPOINT_DIR, f"best_iter_{i:05d}_low_i")
+            checkpoint_result = algo.save(lowest_intr_checkpoint_dir)
+            # Extract path from checkpoint result
+            if hasattr(checkpoint_result, 'checkpoint') and hasattr(checkpoint_result.checkpoint, 'path'):
+                lowest_intrusions_checkpoint_path = checkpoint_result.checkpoint.path
+            else:
+                lowest_intrusions_checkpoint_path = lowest_intr_checkpoint_dir
+            
+            print(f"   🛡️  New lowest intrusions: {lowest_intrusions:.2f} (saved to {os.path.basename(lowest_intrusions_checkpoint_path)})")
 
         # --- Early Stopping Check (OPTIONAL) ---
         if ENABLE_EARLY_STOPPING and not np.isnan(mean_rew):
