@@ -53,8 +53,8 @@ EVALUATION_INTERVAL = 500  # e.g., set to 1 or 5 to save during training
 START_ALPHA = 0.15  # Initial alpha value for SAC entropy term
 
 # IMPORTNAT PARAMETERS FOR PRETRAINING AND BURN-IN
-PRETRAIN_EPISODES = 200 # 150
-BURN_IN_ITERATIONS = 2000     # UPGRADED: 1500→2000 to prevent collapse
+PRETRAIN_EPISODES = 400 # 150
+BURN_IN_ITERATIONS = 4000     # UPGRADED: 1500→2000 to prevent collapse
 
 # --- Expert Mixing Parameters (Linear Decay) ---
 EXPERT_MIX_START = 0.30        # Start with 30% expert data at iteration 0
@@ -147,10 +147,12 @@ CURRENT_INTRUSION_PENALTY = -100  # Start with Stage 1 (curriculum)
 
 # --- INTRUSION PENALTY CURRICULUM SCHEDULE ---
 # 3-stage progressive penalty increase to balance waypoint learning + intrusion avoidance
+# REVISED: 4-stage curriculum with delayed Stage 3
 INTRUSION_CURRICULUM_STAGES = [
-    (0, -150),      # Stage 1 (iter 0-4000): Learn waypoint navigation
-    (5000, -200),   # Stage 2 (iter 4000-8000): Add collision awareness
-    (10000, -250),   # Stage 3 (iter 8000-12000): Master both skills
+    (0, -100),       # Stage 1 (0-4K): Learn navigation
+    (4000, -150),    # Stage 2 (4K-8K): Light collision awareness  
+    (8000, -175),    # Stage 3 (8K-12K): Moderate penalties - KEEP PRACTICING
+    (12000, -250),   # Stage 4 (12K-16K): Full penalties AFTER attention sharpens
 ]
 
 def apply_dynamic_learning_rates(algorithm, iteration):
@@ -369,6 +371,17 @@ class ForceAlphaCallback(DefaultCallbacks):
             print(f"   {stage_name}: Intrusion Penalty = {target_intrusion_penalty}")
             print(f"   Goal: {'Learn waypoint navigation' if stage_number == 1 else 'Add collision awareness' if stage_number == 2 else 'Master both skills'}\n")
         
+        # --- TRAINING SAFEGUARD: Warn if WP rate drops too low ---
+        if current_iter > 6000 and current_iter % 100 == 0:  # Check every 100 iterations after 6K
+            if wp_rate < 0.80:
+                print(f"\n⚠️  WARNING: WP rate dropped to {wp_rate*100:.1f}% at iteration {current_iter}")
+                print(f"   This is below the 80% target. Agent may be prioritizing collision avoidance over navigation.")
+                print(f"   Current intrusion penalty: {target_intrusion_penalty} (Stage {stage_number})")
+                if wp_rate < 0.50:
+                    print(f"   🚨 CRITICAL: WP rate below 50%! Consider reverting to earlier checkpoint.\n")
+                else:
+                    print()
+        
         # Get current performance metrics
         custom_metrics_top = result.get("custom_metrics", {})
         custom_metrics_env = result.get("env_runners", {}).get("custom_metrics", {})
@@ -441,7 +454,7 @@ class ForceAlphaCallback(DefaultCallbacks):
         # ========================================
         # 2. ALPHA (ENTROPY) SCHEDULE - EXTENDED FOR 12K ITERATIONS
         # ========================================
-        FREEZE_UNTIL = 1000   # Iteration where Actor wakes up
+        FREEZE_UNTIL = 2000   # Iteration where Actor wakes up
         DECAY_UNTIL  = 12000  # UPGRADED: 10K→11K slower decay prevents iter 3K-4K crisis
 
         # Define target values - SLOWER DECAY for longer exploration
@@ -648,7 +661,18 @@ def prefill_sac_buffer(algo, n_episodes=30):
                 # --- LOGICA: OVERSAMPLING VOOR BEHAVIOR CLONING BALANS ---
                 # Check of de expert een stuuractie (heading) onderneemt
                 is_stuur_actie = abs(action[0]) > HEADING_THRESHOLD
-                repeat_count = OVERSAMPLE_FACTOR if is_stuur_actie else 1
+                
+                # NEW: Also check if this agent reached waypoint in this episode
+                # This prioritizes successful navigation examples
+                agent_reached_waypoint = aid in env.waypoint_reached_agents
+                
+                # Determine repeat count based on action type and success
+                if agent_reached_waypoint:
+                    repeat_count = 3  # Oversample waypoint success (highest priority)
+                elif is_stuur_actie:
+                    repeat_count = OVERSAMPLE_FACTOR  # Oversample maneuvers
+                else:
+                    repeat_count = 1  # Regular samples
                 
                 if is_stuur_actie:
                     maneuvers_count += 1
@@ -1079,11 +1103,12 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
                         f"Temp={grad_norms['temperature']:.6f}"
                     )
             
-            # --- EARLY STOPPING: Stop when we hit 80% WP (before collapse) ---
-            if smoothed_wp >= 0.80:
-                print(f"\n🎯 Early stopping: 80% WP threshold reached!")
-                print(f"   ✅ Current WP: {avg_wp_rate*100:.1f}%, Smoothed WP: {smoothed_wp*100:.1f}% >= 80%")
+            # --- EARLY STOPPING: Stop when we hit 70% WP (realistic burn-in target) ---
+            if smoothed_wp >= 0.70:
+                print(f"\n🎯 Burn-in success: 70% WP threshold reached!")
+                print(f"   ✅ Current WP: {avg_wp_rate*100:.1f}%, Smoothed WP: {smoothed_wp*100:.1f}% >= 70%")
                 print(f"   Avg Intrusions: {avg_intrusions:.2f}")
+                print(f"   Navigation skills acquired - ready for main training!")
                 print(f"   Stopping at iteration {i}/{n_iterations}")
                 break
         elif i % 50 == 0:

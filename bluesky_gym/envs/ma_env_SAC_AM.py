@@ -39,7 +39,7 @@ STEP_PENALTY = -0.1  # over 300 tijdstappen is dit 30. Small penalty per timeste
 INTRUSION_PENALTY = -250.0  # DEZE WORDT NU DYNAMICALLY IN DE MIAN.PY AANGEGEVEN VOOR DE TRAINING. 
                             # Separation violation - penalty applied every timestep during intrusion
                             # SAC works best with balanced reward scales (within 10x of each other)
-WAYPOINT_REACHED_REWARD =150.0  # Reward for reaching waypoint
+WAYPOINT_REACHED_REWARD =200.0  # Reward for reaching waypoint
 BOUNDARY_VIOLATION_PENALTY = -150.0  # Penalty for leaving polygon boundary (not at waypoint)
 PROGRESS_REWARD_SCALE = 100.0  # Scale factor for distance-to-waypoint progress
 PROXIMITY_MAX_PENALTY = -60.0  # Maximum penalty when at hard boundary
@@ -869,6 +869,7 @@ class SectorEnv(MultiAgentEnv):
                 wpt_qdr, _ = bs.tools.geo.kwikqdrdist(bs.traf.lat[ac_idx], bs.traf.lon[ac_idx], wpt_lat, wpt_lon)
                 ac_hdg = bs.traf.hdg[ac_idx]
                 drift = fn.bound_angle_positive_negative_180(ac_hdg - wpt_qdr)
+                
                 cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
                 airspeed = bs.traf.tas[ac_idx] / 36.0
                 
