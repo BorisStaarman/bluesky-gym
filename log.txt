@@ -196,7 +196,56 @@ het afbouwen van de expert mix. EXPERT_MIX_DECAY_UNTIL = 0.3 ipv 0.75
 intrusion penalty weer verhogen, naar -50. # was -40
 alpha floor naar 0.04. 
 START_ALPHA = 0.09
+dit werkte niet
 
+1_28_5 trainings run op nlr server maar was niet wat. 
+
+1_28_6
+condition penalty, als de waypoint reach rate hoger wordt, wordt de intrusion penalty ook hoger.
+expert mix afbouwen tot 0.05 in 30% van de tijd, zodat er altijd iets over blijft, aangezien die buffer nu een stuk beter werkt. 
+BURN_IN_LR = 7.5e-7 
+opzich werkt deze burn-in goed, maar de weights lijken te klein voor de attention mechanism om daadwerkelijk de omgeving goed te snappen/ 
+Originele goeie waardes voor prima burn-in zijn: 
+7.5 e -7 actor lr
+Sample factor 2
+Heading > 0.03
+150 episodes 
+
+1_28_7
+deze code progeren om de attention mechanims de omgeving beter te laten begrijpen.
+deze heeft een gesplitste learning rate voor de attention mechanism en voor de actor lr tijdens burn-in.
+gesplitste lr voor alles ongeveer. 
+hogere alpha start. 
+
+1_28_8
+dingen doorvoeren die met sasha zijn besproken, dus andere reward functie
+NOG doen
+
+1_28_9
+check progress van sac am ppo toegevoegd. 
+
+2_2_3:
+training werkt hier al aardig maar is nog niet goed genoeg. 
+
+2_3:
+verder op 2_2_3
+beetje aangepaste learning rates
+curriculum learning voor de intrusion penalty, 3 stages. 
+performance is aardig. maar: je ziet dat ze gewoon rondjes vliegen en elkaar niet raken. 
+ze moeten meer incentive krijgen om naar de waypoint toe te gaan, en de drift reward moet omhoog, ze kunnenn nu fucking veel driften zonder dat het boeit. 
+
+
+2_4
+drift penalty omhoog, x10
+step penalty naar -0.2
+waypoint reach reward naar 200. 
+progress reward scale naar 150. 
+
+2_5
+burn-in van de vorige was niet goed.
+de reward van /800 naar /600 doen om de reward duidelijker naar voren te laten komen. 
+zodat de RE ratio ook beter is tijdens training. 
+attention sharpness *4.0 ipv 3.0 
 
 ------------------------------------PPO_AM----------------------------------------
 moet helemaal nog gebeuren, maar kan je ook laten schieten

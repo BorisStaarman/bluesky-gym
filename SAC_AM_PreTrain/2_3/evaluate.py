@@ -123,7 +123,7 @@ if __name__ == "__main__":
     print(f"   {CHECKPOINT_DIR}\n")
 
     # --- Modify checkpoint config to reduce resource requirements ---
-    CHECKPOINT_DIR = 'C:\\Users\\boris\\Documents\\bsgym\\bluesky-gym\\SAC_AM_PreTrain\\2_3\\models\\sectorcr_ma_sac\\best_iter_13676'
+    CHECKPOINT_DIR = 'C:\\Users\\boris\\Documents\\bsgym\\bluesky-gym\\SAC_AM_PreTrain\\2_3\\models\\sectorcr_ma_sac\\best_iter_14609'
     checkpoint_config_file = os.path.join(CHECKPOINT_DIR, "rllib_checkpoint.json")
     checkpoint_config_backup = os.path.join(CHECKPOINT_DIR, "rllib_checkpoint.json.backup")
     

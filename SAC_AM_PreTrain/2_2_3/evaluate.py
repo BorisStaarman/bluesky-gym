@@ -37,8 +37,8 @@ NM2KM = 1.852
 
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with (MUST match training!)
-NUM_EVAL_EPISODES = 10 # How many episodes to run for evaluation
-RENDER = True # Set to True to watch the agent play (keep False for faster evaluation)
+NUM_EVAL_EPISODES = 20 # How many episodes to run for evaluation
+RENDER = False # Set to True to watch the agent play (keep False for faster evaluation)
 
 # --- Visualization Settings ---
 SHOW_ALPHA_VALUES = False  # Set to False to hide attention weight visualization (faster rendering)

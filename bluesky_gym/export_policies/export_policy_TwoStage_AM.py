@@ -342,9 +342,9 @@ print("="*70)
 # Export the best checkpoint from 2_2_3 training
 # IMPORTANT: Update the checkpoint path to your best iteration
 export_policy_torch_old_api(
-    r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM_PreTrain\2_2_3\models\sectorcr_ma_sac\best_iter_11781",
+    r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM_PreTrain\2_4\models\sectorcr_ma_sac\best_iter_15992_low_i",
     "shared_policy",
-    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_Stage_AM_SAC.pt",
+    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_Stage_AM_SAC_3.pt",
     env_creator=sac_sector_env_creator,
     runtime_env=sac_runtime_env
 )

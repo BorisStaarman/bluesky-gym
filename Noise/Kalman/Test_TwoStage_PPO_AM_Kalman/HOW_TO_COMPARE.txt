@@ -1,0 +1,98 @@
+═══════════════════════════════════════════════════════════════════════════
+  KALMAN FILTER COMPARISON GUIDE
+═══════════════════════════════════════════════════════════════════════════
+
+This guide shows you how to run evaluate.py and compare results with/without
+the Kalman filter. After each run, you'll get a PNG plot showing position
+errors over time.
+
+═══════════════════════════════════════════════════════════════════════════
+  STEP 1: Run WITHOUT Kalman Filter (Baseline)
+═══════════════════════════════════════════════════════════════════════════
+
+1. Open: Noise/Kalman/Test_TwoStage_PPO_AM_Kalman/evaluate.py
+
+2. Find line ~55 and set:
+   USE_KALMAN_FILTER = False
+
+3. Run the evaluation:
+   python Noise/Kalman/Test_TwoStage_PPO_AM_Kalman/evaluate.py
+
+4. Wait for completion. You'll see prints like:
+   [position-error-plot] Saved plot to: metrics/run_XXX/pid_XXX/position_error_plot_episode_N.png
+   [position-error-plot] Position Error - Mean: X.XXX m, Std: X.XXX m
+
+5. Find your plot in the metrics directory!
+
+═══════════════════════════════════════════════════════════════════════════
+  STEP 2: Run WITH Kalman Filter
+═══════════════════════════════════════════════════════════════════════════
+
+1. Open: Noise/Kalman/Test_TwoStage_PPO_AM_Kalman/evaluate.py
+
+2. Find line ~55 and set:
+   USE_KALMAN_FILTER = True
+
+3. Run the evaluation again:
+   python Noise/Kalman/Test_TwoStage_PPO_AM_Kalman/evaluate.py
+
+4. Wait for completion and find your plot!
+
+═══════════════════════════════════════════════════════════════════════════
+  WHAT YOU'LL SEE IN THE PLOTS
+═══════════════════════════════════════════════════════════════════════════
+
+Each PNG file contains 2 plots:
+
+📊 TOP PLOT: Position Error Over Time
+   - Shows position error (meters) for each agent over all timesteps
+   - Red dashed line = Mean error across all agents
+   - Gray dotted line = Expected noise std (3.5 m baseline)
+   
+📊 BOTTOM PLOT: Velocity Error Over Time
+   - Shows velocity error (m/s) for each agent over all timesteps
+   - Red dashed line = Mean error across all agents
+   - Gray dotted line = Expected noise std (0.1 m/s baseline)
+
+Title will show: "WITH Kalman Filter" or "WITHOUT Kalman Filter (Noisy)"
+
+═══════════════════════════════════════════════════════════════════════════
+  EXPECTED RESULTS
+═══════════════════════════════════════════════════════════════════════════
+
+WITHOUT Kalman Filter (Baseline):
+  ⚠️  Position Error Mean: ~3.5 m (matches noise std)
+  ⚠️  Velocity Error Mean: ~0.1 m/s (matches noise std)
+  ⚠️  Plots show noisy/jittery lines
+
+WITH Kalman Filter:
+  ✅ Position Error Mean: <3.5 m (reduced!)
+  ✅ Velocity Error Mean: <0.1 m/s (reduced!)
+  ✅ Plots show smoother lines
+  ✅ Better state estimation for the policy
+
+═══════════════════════════════════════════════════════════════════════════
+  WHERE TO FIND YOUR PLOTS
+═══════════════════════════════════════════════════════════════════════════
+
+Location: metrics/run_{RUN_ID}/pid_{PROCESS_ID}/
+
+Files generated:
+  - position_error_plot_episode_1.png
+  - position_error_plot_episode_2.png
+  - ... (one per episode)
+  
+Also generated:
+  - position_error_metrics.csv (detailed statistics)
+
+═══════════════════════════════════════════════════════════════════════════
+  TIPS
+═══════════════════════════════════════════════════════════════════════════
+
+✓ Run multiple episodes (NUM_EVAL_EPISODES) to get better statistics
+✓ The plot is generated after each episode completes
+✓ Console will print mean/std of errors for quick comparison
+✓ Use different RUN_ID values to keep runs organized
+✓ The Kalman filter adds minimal computational overhead (<0.1ms per agent)
+
+═══════════════════════════════════════════════════════════════════════════

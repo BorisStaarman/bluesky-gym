@@ -53,13 +53,13 @@ EVALUATION_INTERVAL = 500  # e.g., set to 1 or 5 to save during training
 START_ALPHA = 0.15  # Initial alpha value for SAC entropy term
 
 # IMPORTNAT PARAMETERS FOR PRETRAINING AND BURN-IN
-PRETRAIN_EPISODES = 400 # 150
-BURN_IN_ITERATIONS = 4000     # UPGRADED: 1500→2000 to prevent collapse
+PRETRAIN_EPISODES = 200 # 150
+BURN_IN_ITERATIONS = 2000     # UPGRADED: 1500→2000 to prevent collapse
 
 # --- Expert Mixing Parameters (Linear Decay) ---
 EXPERT_MIX_START = 0.30        # Start with 30% expert data at iteration 0
 EXPERT_MIX_END = 0.0           # End with 0% expert data
-EXPERT_MIX_DECAY_UNTIL = 0.2  # Decay to 0% by 75% of total iterations (375/500)
+EXPERT_MIX_DECAY_UNTIL = 0.1  # Decay to 0% by 75% of total iterations (375/500)
 
 # --- Burn-in Phase Parameters (Offline Learning from Expert Buffer) ---
 BURN_IN_BATCH_SIZE = 4096     # Batch size for burn-in sampling
@@ -76,7 +76,7 @@ ENABLE_BURN_IN = True         # Set to False to skip burn-in phase
 # --- VEILIGE LEARNING RATE AANPASSING VOOR BURN-IN ---
 # RESTORED: Parameters that achieved 74% WP success in burn-in
 BURN_IN_TEMPERATURE_LR_LOCAL = 1e-4  # Stable temperature growth (worked at 74% run)
-BURN_IN_ACTOR_LR_LOCAL = 1e-6       # Keep stable for navigation
+BURN_IN_ACTOR_LR_LOCAL = 5e-7       # Keep stable for navigation
 BURN_IN_ATTENTION_LR_LOCAL = 3e-5   # RESTORED: 8e-5 was too high, causing instability
 BURN_IN_CRITIC_LR_LOCAL = 1e-4      # Keep critic stable
 
@@ -650,18 +650,7 @@ def prefill_sac_buffer(algo, n_episodes=30):
                 # --- LOGICA: OVERSAMPLING VOOR BEHAVIOR CLONING BALANS ---
                 # Check of de expert een stuuractie (heading) onderneemt
                 is_stuur_actie = abs(action[0]) > HEADING_THRESHOLD
-                
-                # NEW: Also check if this agent reached waypoint in this episode
-                # This prioritizes successful navigation examples
-                agent_reached_waypoint = aid in env.waypoint_reached_agents
-                
-                # Determine repeat count based on action type and success
-                if agent_reached_waypoint:
-                    repeat_count = 3  # Oversample waypoint success (highest priority)
-                elif is_stuur_actie:
-                    repeat_count = OVERSAMPLE_FACTOR  # Oversample maneuvers
-                else:
-                    repeat_count = 1  # Regular samples
+                repeat_count = OVERSAMPLE_FACTOR if is_stuur_actie else 1
                 
                 if is_stuur_actie:
                     maneuvers_count += 1
@@ -2286,38 +2275,49 @@ if __name__ == "__main__":
             )
 
         # --- Best Checkpoint Tracking (ALWAYS ACTIVE) ---
-        # Skip saving best model for first 50 iterations (warm-up period)
-        if i > 50 and not np.isnan(mean_rew) and mean_rew > best_reward:
+        # Check if we have both new best reward AND new lowest intrusions
+        is_new_best_reward = i > 50 and not np.isnan(mean_rew) and mean_rew > best_reward
+        is_new_lowest_intrusions = i > 50 and not np.isnan(avg_intrusions) and avg_intrusions < lowest_intrusions
+        
+        # Update tracking variables
+        if is_new_best_reward:
             best_reward = mean_rew
             best_reward_iteration = i
-            
-            # Save checkpoint for new best reward
-            best_checkpoint_dir = os.path.join(CHECKPOINT_DIR, f"best_iter_{i:05d}")
-            checkpoint_result = algo.save(best_checkpoint_dir)
-            # Extract path from checkpoint result
-            if hasattr(checkpoint_result, 'checkpoint') and hasattr(checkpoint_result.checkpoint, 'path'):
-                best_checkpoint_path = checkpoint_result.checkpoint.path
-            else:
-                best_checkpoint_path = best_checkpoint_dir
-            
-            print(f"   ⭐ New best reward: {best_reward:.3f} (saved to {os.path.basename(best_checkpoint_path)})")
         
-        # --- Lowest Intrusion Checkpoint Tracking (ALWAYS ACTIVE) ---
-        # Skip saving for first 50 iterations and only if intrusions metric is valid
-        if i > 50 and not np.isnan(avg_intrusions) and avg_intrusions < lowest_intrusions:
+        if is_new_lowest_intrusions:
             lowest_intrusions = avg_intrusions
             lowest_intrusions_iteration = i
+        
+        # Save checkpoint only once if both conditions are met
+        if is_new_best_reward or is_new_lowest_intrusions:
+            # Determine checkpoint naming and messages
+            if is_new_best_reward and is_new_lowest_intrusions:
+                # Both conditions met - save once with both indicators
+                checkpoint_dir = os.path.join(CHECKPOINT_DIR, f"best_iter_{i:05d}_low_i")
+                messages = [
+                    f"⭐ New best reward: {best_reward:.3f}",
+                    f"🛡️  New lowest intrusions: {lowest_intrusions:.2f}"
+                ]
+            elif is_new_best_reward:
+                # Only best reward
+                checkpoint_dir = os.path.join(CHECKPOINT_DIR, f"best_iter_{i:05d}")
+                messages = [f"⭐ New best reward: {best_reward:.3f}"]
+            else:
+                # Only lowest intrusions
+                checkpoint_dir = os.path.join(CHECKPOINT_DIR, f"best_iter_{i:05d}_low_i")
+                messages = [f"🛡️  New lowest intrusions: {lowest_intrusions:.2f}"]
             
-            # Save checkpoint for new lowest intrusions
-            lowest_intr_checkpoint_dir = os.path.join(CHECKPOINT_DIR, f"best_iter_{i:05d}_low_i")
-            checkpoint_result = algo.save(lowest_intr_checkpoint_dir)
+            # Save the checkpoint
+            checkpoint_result = algo.save(checkpoint_dir)
             # Extract path from checkpoint result
             if hasattr(checkpoint_result, 'checkpoint') and hasattr(checkpoint_result.checkpoint, 'path'):
-                lowest_intrusions_checkpoint_path = checkpoint_result.checkpoint.path
+                checkpoint_path = checkpoint_result.checkpoint.path
             else:
-                lowest_intrusions_checkpoint_path = lowest_intr_checkpoint_dir
+                checkpoint_path = checkpoint_dir
             
-            print(f"   🛡️  New lowest intrusions: {lowest_intrusions:.2f} (saved to {os.path.basename(lowest_intrusions_checkpoint_path)})")
+            # Print all applicable messages
+            for msg in messages:
+                print(f"   {msg} (saved to {os.path.basename(checkpoint_path)})")
 
         # --- Early Stopping Check (OPTIONAL) ---
         if ENABLE_EARLY_STOPPING and not np.isnan(mean_rew):

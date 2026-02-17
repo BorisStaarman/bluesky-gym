@@ -35,16 +35,16 @@ NUM_AC_STATE = N_AGENTS-1 # number of aircraft in observation vector
 MAX_STEPS = 300 # max steps per episode
 
 # =========================== REWARD PENALTIES PARAMETERS ===========================
-STEP_PENALTY = -0.1  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
+STEP_PENALTY = -0.2  # over 300 tijdstappen is dit 30. Small penalty per timestep to encourage efficiency
 INTRUSION_PENALTY = -250.0  # DEZE WORDT NU DYNAMICALLY IN DE MIAN.PY AANGEGEVEN VOOR DE TRAINING. 
                             # Separation violation - penalty applied every timestep during intrusion
                             # SAC works best with balanced reward scales (within 10x of each other)
 WAYPOINT_REACHED_REWARD =200.0  # Reward for reaching waypoint
 BOUNDARY_VIOLATION_PENALTY = -150.0  # Penalty for leaving polygon boundary (not at waypoint)
-PROGRESS_REWARD_SCALE = 100.0  # Scale factor for distance-to-waypoint progress
+PROGRESS_REWARD_SCALE = 150.0  # Scale factor for distance-to-waypoint progress
 PROXIMITY_MAX_PENALTY = -60.0  # Maximum penalty when at hard boundary
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
-DRIFT_PENALTY = -0.03  # Small penalty for heading deviation
+DRIFT_PENALTY = -0.3  # Small penalty for heading deviation
 
 # boeie
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
@@ -495,8 +495,8 @@ class SectorEnv(MultiAgentEnv):
                 step_penalty = STEP_PENALTY
                 
                 # Total reward now includes proximity penalty
-                # Scaling: /400 gives good gradient signals (waypoint reward ~0.25, intrusion penalty ~-0.05 per step)
-                rewards[agent]  = ( intrusion_reward + step_penalty + drift_reward + progress_reward + proximity_penalty + boundary_penalty ) / 1000.0
+                # Scaling: /500 gives strong gradient signals (matches 2_10 successful burn-in)
+                rewards[agent]  = ( intrusion_reward + step_penalty + drift_reward + progress_reward + proximity_penalty + boundary_penalty ) / 500.0
                 
                 # accumulate for per-episode stats
                 self._rewards_acc[agent]["progress"]  += float(progress_reward)
