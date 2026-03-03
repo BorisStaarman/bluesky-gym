@@ -50,8 +50,8 @@ NM2KM = 1.852
 N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
 # RENDER = False # Set to True to watch the agent play
-NUM_EVAL_EPISODES = 20  # How many episodes to run for evaluation
-RENDER = True # Set to True to watch the agent play
+NUM_EVAL_EPISODES = 600  # 300 episodes: 150 probe + 150 reference for bootstrap convergence analysis
+RENDER = False # Set to True to watch the agent play
 
 # This path MUST match the checkpoint directory from your main.py training script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -371,6 +371,12 @@ if __name__ == "__main__":
     print(f"  - Episodes without Intrusion: {episode_witout_intrusion}")
     
     print('average density created', N_AGENTS / np.mean(env.areas_km2))
+
+    # --- Save episode rewards for KS convergence analysis ---
+    rewards_path = os.path.join(script_dir, "episode_rewards.npy")
+    np.save(rewards_path, np.array(episode_rewards))
+    print(f"\n💾 Episode rewards saved to: {rewards_path}")
+    print("   Run ks_analysis.py to perform the KS convergence analysis.")
     
     # print(f"\n📐 Polygon Area Statistics:")
     # print(f"  - Average Area: {avg_polygon_area:.4f} km²")

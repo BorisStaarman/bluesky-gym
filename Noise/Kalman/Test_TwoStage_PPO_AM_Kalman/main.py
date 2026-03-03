@@ -107,7 +107,7 @@ class MVPDataBridgeCallback(DefaultCallbacks):
 N_AGENTS = 20  # Number of agents for training
 
 # --- STAGE CONTROL ---
-RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
+RUN_STAGE_2 = False  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
 
 # --- STAGE 1: IMITATION LEARNING (PPO with custom loss) ---
 iterations_stage1 = 80  # Number of iterations for Stage 1 imitation learning
@@ -128,17 +128,29 @@ METRICS_DIR = os.path.join(script_dir, "metrics")
 # --- Path for model ---
 CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac")
 
-def _find_latest_checkpoint(base_dir: str) -> str | None:
-    """Return the directory path containing algorithm_state.json with latest mtime.
+def _find_latest_checkpoint(base_dir: str, exclude_prefix: str | None = None) -> str | None:
+    """Return the directory path containing an RLlib checkpoint with latest mtime.
 
-    Scans base_dir recursively for files named 'algorithm_state.json'. If found,
-    returns the parent directory of the newest one; else returns None.
+    Scans base_dir recursively for algorithm_state.json or algorithm_state.pkl
+    (newer RLlib versions use .pkl). Returns parent directory of the newest one.
+    
+    Args:
+        base_dir: Root directory to search.
+        exclude_prefix: If provided, skip any subtree whose absolute path starts
+            with this prefix (e.g. to exclude stage1_best_weights when searching
+            for Stage 2 checkpoints).
     """
     latest_path = None
     latest_mtime = -1.0
+    exclude_abs = os.path.abspath(exclude_prefix) if exclude_prefix else None
     for root, dirs, files in os.walk(base_dir):
-        if "algorithm_state.json" in files:
-            fpath = os.path.join(root, "algorithm_state.json")
+        # Skip excluded subtree
+        if exclude_abs and os.path.abspath(root).startswith(exclude_abs):
+            dirs.clear()  # prevent os.walk from descending further
+            continue
+        if "algorithm_state.json" in files or "algorithm_state.pkl" in files:
+            candidate = "algorithm_state.pkl" if "algorithm_state.pkl" in files else "algorithm_state.json"
+            fpath = os.path.join(root, candidate)
             try:
                 mtime = os.path.getmtime(fpath)
             except OSError:
@@ -270,6 +282,7 @@ def build_trainer(n_agents, stage=1, restore_path=None):
                     "hidden_dims": [512, 512],
                     "is_critic": False,
                     "n_agents": n_agents,
+                    "embed_dim": 128,  # Must match Stage 1 to load weights correctly
                 },
                 "free_log_std": True,
                 "vf_share_layers": False,
@@ -289,6 +302,8 @@ def build_trainer(n_agents, stage=1, restore_path=None):
                 "n_agents": n_agents,
                 "run_id": RUN_ID,
                 "metrics_base_dir": METRICS_DIR,
+                "use_kalman_filter": True,   # Enable Kalman filter for noise reduction
+                "kalman_burn_in_steps": 3,   # Use noisy obs for first 3 steps while filter converges
             },
             disable_env_checking=True,
         )
@@ -296,7 +311,7 @@ def build_trainer(n_agents, stage=1, restore_path=None):
         .env_runners(
             num_env_runners= os.cpu_count() - 1,
             num_envs_per_env_runner=1,
-            sample_timeout_s=120.0,
+            sample_timeout_s=600.0,  # Increased: Kalman env takes ~2.5min/iter, 120s was too short
         )
         .callbacks(current_callbacks) 
         .training(**training_config)
@@ -416,7 +431,9 @@ def run_fixed_eval(algo: Algorithm, n_episodes: int = 20, render: bool = False, 
             render_mode="human" if render else None, 
             n_agents=n_agents,
             run_id=RUN_ID,
-            metrics_base_dir=METRICS_DIR
+            metrics_base_dir=METRICS_DIR,
+            use_kalman_filter=True,    # Must match training workers
+            kalman_burn_in_steps=3,
         )
         rewards, lengths, intrusions, waypoints = [], [], [], []
 
@@ -544,6 +561,7 @@ def _write_eval_row(metrics: dict, iteration: int, out_dir: str):
 
 if __name__ == "__main__":
     
+    
     # Start timing
     training_start_time = time.time()
     
@@ -552,6 +570,7 @@ if __name__ == "__main__":
     ray.init(runtime_env={
         "working_dir": script_dir,
         "py_modules": [os.path.join(script_dir, "attention_model_A.py")],
+        "excludes": ["models/", "metrics/", "__pycache__/", "*.zip", "*.pt", "*.pth", "*.ckpt"],
     })
 
     print("-" * 30)
@@ -563,16 +582,30 @@ if __name__ == "__main__":
     # and if we actually want to run stage 1.
     
     stage1_checkpoint = os.path.join(CHECKPOINT_DIR, "stage1_best_weights")
-    run_stage1 = False
-    restored_from = None  # Initialize to None - will be set if checkpoint found or Stage 1 runs
-    
+    restored_from = None  # will be set below
+
     # Check if we are trying to resume a Stage 2 run
-    latest_checkpoint = _find_latest_checkpoint(CHECKPOINT_DIR)
-    if latest_checkpoint:
-        print(f"🔄 Found existing Stage 2 checkpoint: {latest_checkpoint}")
+    # Exclude the stage1_best_weights subdirectory — it is not a Stage 2 checkpoint!
+    latest_stage2_checkpoint = _find_latest_checkpoint(CHECKPOINT_DIR, exclude_prefix=stage1_checkpoint)
+    stage1_exists = bool(_find_latest_checkpoint(stage1_checkpoint))
+
+    if latest_stage2_checkpoint:
+        # Resume an existing Stage 2 run
+        print(f"🔄 Found existing Stage 2 checkpoint: {latest_stage2_checkpoint}")
         print("⏭️  Skipping Stage 1 and resuming Stage 2 directly.")
         run_stage1 = False
-        restored_from = latest_checkpoint
+        restored_from = latest_stage2_checkpoint
+    elif stage1_exists:
+        # Stage 1 already done, go straight to Stage 2
+        restored_from = _find_latest_checkpoint(stage1_checkpoint)
+        print(f"✅ Found Stage 1 checkpoint: {restored_from}")
+        run_stage1 = False
+    elif RUN_STAGE_2:
+        # No checkpoints at all — must run Stage 1 first before Stage 2
+        print("⚠️  No Stage 1 or Stage 2 checkpoint found — running Stage 1 first.")
+        run_stage1 = True
+    else:
+        run_stage1 = True
     
     if run_stage1:
         print(f"\n{'='*60}")
@@ -818,14 +851,36 @@ if __name__ == "__main__":
         timesteps_this_iter = result.get("num_env_steps_sampled_this_iter", 0)
         total_training_steps += int(timesteps_this_iter) if isinstance(timesteps_this_iter, (int, float)) else 0
         
-        # Simplified extraction for context:
+        # Extract learner stats - try all known paths for this RLlib version
         info = result.get("info", {})
-        learner_stats = info.get("learner", {}).get("shared_policy", {}).get("learner_stats", {})
-        policy_loss = learner_stats.get("policy_loss", learner_stats.get("pi_loss", 0.0))
-        vf_loss = learner_stats.get("vf_loss", learner_stats.get("value_function_loss", 0.0))
-        entropy = learner_stats.get("entropy", 0.0)
-        vf_explained_var = learner_stats.get("vf_explained_var", 0.0)
-        total_loss = learner_stats.get("total_loss", abs(policy_loss) + abs(vf_loss))
+        # Path 1: old API stack (most common)
+        learner_stats = (
+            info.get("learner", {}).get("shared_policy", {}).get("learner_stats", {})
+            or info.get("learner", {}).get("shared_policy", {})  # sometimes no nested learner_stats key
+        )
+        policy_loss = learner_stats.get("policy_loss", learner_stats.get("pi_loss", float("nan")))
+        vf_loss = learner_stats.get("vf_loss", learner_stats.get("value_function_loss", float("nan")))
+        entropy = learner_stats.get("entropy", float("nan"))
+        vf_explained_var = learner_stats.get("vf_explained_var", float("nan"))
+        total_loss = learner_stats.get("total_loss", float("nan"))
+
+        # Fallback: try policy.loss_stats directly (set by custom loss if running Stage 1)
+        if all(v != v for v in [policy_loss, entropy, total_loss]):  # all NaN check
+            try:
+                policy_obj = algo.get_policy("shared_policy")
+                ls = getattr(policy_obj, "loss_stats", {})
+                if ls:
+                    policy_loss = ls.get("policy_loss", ls.get("pi_loss", float("nan")))
+                    vf_loss = ls.get("vf_loss", float("nan"))
+                    entropy = ls.get("entropy", float("nan"))
+                    vf_explained_var = ls.get("vf_explained_var", float("nan"))
+                    total_loss = ls.get("total_loss", float("nan"))
+            except Exception:
+                pass
+
+        # Throughput is always available and useful as a health check
+        learn_throughput = result.get("timers", {}).get("learn_throughput", float("nan"))
+        steps_this_iter = result.get("num_env_steps_sampled_this_iter", 0)
         
         total_loss_history.append(total_loss)
         policy_loss_history.append(policy_loss)
@@ -848,13 +903,22 @@ if __name__ == "__main__":
         
         # During warm-up, show detailed loss breakdown to monitor critic learning
         if i <= WARMUP_ITERATIONS:
-            print(f"Stage 2 {phase_indicator} - Iter {i}/{target_iters} | Reward: {mean_rew:.3f} | Total Loss: {total_loss:.4f}")
-            print(f"       Policy Loss: {policy_loss:.4f} | Value Loss: {vf_loss:.4f} | Entropy: {entropy:.4f}")
-            print(f"       VF Explained Var: {vf_explained_var:.4f} (1.0=perfect, 0.0=random)")
+            tl_str  = f"{total_loss:.4f}"     if total_loss      == total_loss      else "n/a"
+            pl_str  = f"{policy_loss:.4f}"    if policy_loss     == policy_loss     else "n/a"
+            vf_str  = f"{vf_loss:.4f}"        if vf_loss         == vf_loss         else "n/a"
+            en_str  = f"{entropy:.4f}"        if entropy         == entropy         else "n/a"
+            vv_str  = f"{vf_explained_var:.4f}" if vf_explained_var == vf_explained_var else "n/a"
+            print(f"Stage 2 {phase_indicator} - Iter {i}/{target_iters} | Reward: {mean_rew:.3f} | Total Loss: {tl_str}")
+            print(f"       Policy Loss: {pl_str} | Value Loss: {vf_str} | Entropy: {en_str}")
+            print(f"       VF Explained Var: {vv_str} | Throughput: {learn_throughput:.0f} steps/s | SampledSteps: {steps_this_iter}")
             print(f"       (LR={WARMUP_LR:.2e}, VF_Coeff=2.0 - critic learning to evaluate teacher policy)")
         else:
-            # After warm-up, show entropy to track exploration vs exploitation balance
-            print(f"Stage 2 {phase_indicator} - Iter {i}/{target_iters} | Reward: {mean_rew:.3f} | Loss: {total_loss:.3f} | Entropy: {entropy:.3f} | VF_Var: {vf_explained_var:.3f}")
+            # After warm-up: show throughput as a training health indicator
+            # (learner_stats gradient info is unavailable with old API stack + GPU in this RLlib version)
+            loss_str   = f"{total_loss:.3f}" if total_loss == total_loss else "n/a"
+            entr_str   = f"{entropy:.3f}"    if entropy == entropy    else "n/a"
+            vfvar_str  = f"{vf_explained_var:.3f}" if vf_explained_var == vf_explained_var else "n/a"
+            print(f"Stage 2 {phase_indicator} - Iter {i}/{target_iters} | Reward: {mean_rew:.3f} | Loss: {loss_str} | Entropy: {entr_str} | VF_Var: {vfvar_str} | Throughput: {learn_throughput:.0f} steps/s | SampledSteps: {steps_this_iter}")
             if i == WARMUP_ITERATIONS + 2:
                 print(f"       (LR={FINETUNE_LR:.2e} - entropy increased for exploration)")
 

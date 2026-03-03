@@ -118,12 +118,13 @@ class KalmanDenoiser:
             First observation [x, y, vx, vy]
         """
         self.x = initial_measurement.copy()
-        # Initial covariance: high uncertainty
+        # Initial covariance: REDUCED for faster convergence
+        # Trust initial measurement more to avoid poor estimates in early timesteps
         self.P = np.diag([
-            (5.0 / self.x_norm)**2,  # Initial position uncertainty ~5m
-            (5.0 / self.y_norm)**2,
-            (0.5 / self.v_norm)**2,  # Initial velocity uncertainty ~0.5 m/s
-            (0.5 / self.v_norm)**2,
+            (self.pos_noise_x)**2,  # Match measurement noise (3.5m → normalized)
+            (self.pos_noise_y)**2,  # Match measurement noise
+            (self.vel_noise)**2,    # Match measurement noise (0.1 m/s → normalized)
+            (self.vel_noise)**2,    # Match measurement noise
         ]).astype(np.float32)
     
     def predict(self):

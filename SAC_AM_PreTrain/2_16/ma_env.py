@@ -495,8 +495,8 @@ class SectorEnv(MultiAgentEnv):
                 step_penalty = STEP_PENALTY
                 
                 # Total reward now includes proximity penalty
-                # Scaling: /400 gives good gradient signals (waypoint reward ~0.25, intrusion penalty ~-0.05 per step)
-                rewards[agent]  = ( intrusion_reward + step_penalty + drift_reward + progress_reward + proximity_penalty + boundary_penalty ) / 800.0
+                # Scaling: /500 gives strong gradient signals (matches 2_10 successful burn-in)
+                rewards[agent]  = ( intrusion_reward + step_penalty + drift_reward + progress_reward + proximity_penalty + boundary_penalty ) / 500.0
                 
                 # accumulate for per-episode stats
                 self._rewards_acc[agent]["progress"]  += float(progress_reward)

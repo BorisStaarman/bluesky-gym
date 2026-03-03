@@ -38,7 +38,7 @@ NM2KM = 1.852
 
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with (MUST match training!)
-NUM_EVAL_EPISODES = 20 # How many episodes to run for evaluation
+NUM_EVAL_EPISODES = 600  # 600 episodes: 300 probe + 300 reference for bootstrap convergence analysis
 RENDER = False # Set to True to watch the agent play (keep False for faster evaluation)
 
 # --- Visualization Settings ---
@@ -494,8 +494,12 @@ if __name__ == "__main__":
     print(f"  - Episodes without Intrusion: {episode_witout_intrusion}")
     
     print('average density created', N_AGENTS / np.mean(env.areas_km2))
-    
-    # --- Attention Weight Statistics ---
+
+    # --- Save episode rewards for bootstrap convergence analysis ---
+    rewards_path = os.path.join(script_dir, "episode_rewards.npy")
+    np.save(rewards_path, np.array(episode_rewards))
+    print(f"\n💾 Episode rewards saved to: {rewards_path}")
+    print("   Run ks_analysis.py to perform the bootstrap convergence analysis.")
     if all_attention_weights:
         # Concatenate all collected attention weights
         all_attn = np.concatenate(all_attention_weights)

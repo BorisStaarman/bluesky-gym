@@ -107,13 +107,14 @@ class SectorEnv(MultiAgentEnv):
                  debug_obs=False, debug_obs_episodes=2, debug_obs_interval=1, debug_obs_agents=None,
                  collect_obs_stats=False, print_obs_stats_per_episode=False,
                  intrusion_penalty=None, proximity_max_penalty=None, metrics_base_dir=None, center=None,
-                 use_kalman_filter=False):
+                 use_kalman_filter=False, kalman_burn_in_steps=0):
         super().__init__()
         
         self.render_mode = render_mode
         
-        # Kalman filter toggle
+        # Kalman filter toggle and burn-in period
         self.use_kalman_filter = use_kalman_filter
+        self.kalman_burn_in_steps = kalman_burn_in_steps  # Steps to use noisy obs before switching to filtered
         
         # Debug and stats tracking settings
         self.debug_obs = debug_obs
@@ -272,13 +273,13 @@ class SectorEnv(MultiAgentEnv):
         self._error_timesteps = defaultdict(list)
         
         # Print max observation values for normalization analysis (every 100 episodes)
-        if self._episode_index % 100 == 0:
-            print(f"\n[Episode {self._episode_index}] Max observation values:")
-            print(f"  max_d_now:  {self.max_d_now:.4f} m")
-            print(f"  max_dx:     {self.max_dx:.4f} m")
-            print(f"  max_dy:     {self.max_dy:.4f} m")
-            print(f"  max_dvx:    {self.max_dvx:.4f} m/s")
-            print(f"  max_dvy:    {self.max_dvy:.4f} m/s")
+        # if self._episode_index % 100 == 0:
+        #     print(f"\n[Episode {self._episode_index}] Max observation values:")
+        #     print(f"  max_d_now:  {self.max_d_now:.4f} m")
+        #     print(f"  max_dx:     {self.max_dx:.4f} m")
+        #     print(f"  max_dy:     {self.max_dy:.4f} m")
+        #     print(f"  max_dvx:    {self.max_dvx:.4f} m/s")
+        #     print(f"  max_dvy:    {self.max_dvy:.4f} m/s")
         # for savin  data in csv file
         self._agent_steps = {a: 0 for a in self.agents}
         self._rewards_acc = {a: {"drift": 0.0, "progress": 0.0, "intrusion": 0.0, "path_efficiency": 0.0, "boundary": 0.0, "step": 0.0, "proximity": 0.0} for a in self.agents}
@@ -441,16 +442,15 @@ class SectorEnv(MultiAgentEnv):
                 self._write_obs_stats_csv()
             except Exception as e:
                 print(f"[obs-stats] failed to write CSV at episode end: {e}")
-            # write position error metrics CSV at episode end
-            try:
-                self._write_position_error_metrics_csv()
-            except Exception as e:
-                print(f"[position-error-metrics] failed to write CSV at episode end: {e}")
-            # Generate position error plot at episode end
-            try:
-                self._plot_position_errors()
-            except Exception as e:
-                print(f"[position-error-plot] failed to generate plot at episode end: {e}")
+            # DISABLED: position error CSV and plot during training (too noisy)
+            # try:
+            #     self._write_position_error_metrics_csv()
+            # except Exception as e:
+            #     print(f"[position-error-metrics] failed to write CSV at episode end: {e}")
+            # try:
+            #     self._plot_position_errors()
+            # except Exception as e:
+            #     print(f"[position-error-plot] failed to generate plot at episode end: {e}")
             for a in agents_to_remove:
                 self._flush_agent_buffer(a)
             
@@ -961,16 +961,15 @@ class SectorEnv(MultiAgentEnv):
             self._write_obs_stats_csv()
         except Exception as e:
             print(f"[obs-stats] failed to write CSV: {e}")
-        # write position error metrics CSV once
-        try:
-            self._write_position_error_metrics_csv()
-        except Exception as e:
-            print(f"[position-error-metrics] failed to write CSV: {e}")
-        # Generate final position error plot
-        try:
-            self._plot_position_errors()
-        except Exception as e:
-            print(f"[position-error-plot] failed to generate plot: {e}")
+        # DISABLED: position error CSV and plot on close (too noisy during training)
+        # try:
+        #     self._write_position_error_metrics_csv()
+        # except Exception as e:
+        #     print(f"[position-error-metrics] failed to write CSV: {e}")
+        # try:
+        #     self._plot_position_errors()
+        # except Exception as e:
+        #     print(f"[position-error-plot] failed to generate plot: {e}")
         if self.window is not None:
             pygame.display.quit()
             pygame.quit()
@@ -1498,11 +1497,19 @@ class SectorEnv(MultiAgentEnv):
                 self._velocity_errors[agent_id].append(vel_error_filtered)
                 self._error_timesteps[agent_id].append(self._env_step)
                 
-                # Use filtered values in observations
-                final_loc = filtered_loc
-                final_vx = filtered_vx
-                final_vy = filtered_vy
-                final_gs = np.sqrt(filtered_vx**2 + filtered_vy**2)
+                # BURN-IN LOGIC: Use noisy obs during burn-in, filtered obs after
+                if self._env_step < self.kalman_burn_in_steps:
+                    # During burn-in: filter runs but we use noisy observations
+                    final_loc = noisy_loc
+                    final_vx = vx_noisy
+                    final_vy = vy_noisy
+                    final_gs = noisy_gs
+                else:
+                    # After burn-in: use filtered values in observations
+                    final_loc = filtered_loc
+                    final_vx = filtered_vx
+                    final_vy = filtered_vy
+                    final_gs = np.sqrt(filtered_vx**2 + filtered_vy**2)
                 
             else:
                 # No Kalman filtering - use noisy observations directly

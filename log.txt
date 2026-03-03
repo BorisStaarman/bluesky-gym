@@ -247,6 +247,23 @@ de reward van /800 naar /600 doen om de reward duidelijker naar voren te laten k
 zodat de RE ratio ook beter is tijdens training. 
 attention sharpness *4.0 ipv 3.0 
 
+2_16
+aanpassingen in vergelijking met 2_4:
+get reward /600 ipv 800
+intrusion penalty schema is anders.
+kl_divergence toegevoegd
+
+2_18 
+verder itereren op 2_4
+
+2_19
+de rewards zouden volgens literatuur in een range van -10 tot 10 moeten zitten. die van mij zaten tussen -150 en 0. 
+dus alle rewards hier veel kleiner gemaakt, en proberen stabiel te laten trainen. 
+parameters veranderd, alpha (lager) en grad clip. (hoger)
+alle critic lrs omhoog. 
+
+
+
 ------------------------------------PPO_AM----------------------------------------
 moet helemaal nog gebeuren, maar kan je ook laten schieten
 
@@ -360,3 +377,6 @@ stage 2: nieuwe check progress functie
 --------------------------------------Two_Stage_SAC -----------------------------------------
 dit werkt niet hetzelfde als PPO
 idee is om de buffer te vullen met 30% mvp data voordat de training begint. 
+
+
+

@@ -2810,6 +2810,26 @@ if __name__ == "__main__":
         if zero_idx < len(expert_mix_history):
             print(f"   • Expert mixing ended at iteration {zero_idx + 1} ({zero_idx/len(expert_mix_history)*100:.1f}% of training)")
     
+    # --- Save training metrics to pickle file for plot_reward_only.py ---
+    import pickle
+    metrics_pkl_dir = os.path.join(METRICS_DIR, f"run_{RUN_ID}")
+    os.makedirs(metrics_pkl_dir, exist_ok=True)
+    training_metrics_path = os.path.join(metrics_pkl_dir, "training_metrics.pkl")
+    
+    training_metrics = {
+        'reward_history': reward_history,
+        'episode_length_history': episode_length_history,
+        'policy_loss_history': policy_loss_history,
+        'q_loss_history': q_loss_history,
+        'alpha_history': alpha_history,
+        'entropy_history': entropy_history,
+        'waypoint_rate_history': waypoint_rate_history,
+        'avg_intrusions_history': avg_intrusions_history,
+    }
+    
+    with open(training_metrics_path, 'wb') as f:
+        pickle.dump(training_metrics, f)
+    print(f"📊 Training metrics pickle saved to: {training_metrics_path}")
     
 
     ray.shutdown()

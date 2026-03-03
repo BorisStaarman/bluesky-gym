@@ -1,0 +1,9 @@
+------------ ppo assymetric --------------------
+werkt top
+
+------------ ppo assymetric kalman --------------------
+Eerste training run werkte niet goed, beetje onstabiel. Nog een keer proberen met een geclampede log_std  in de attention model. 
+
+------------ ppo  kalman --------------------
+gebasseerd op ppo assymetrc kalman
+kijken of de training hier beter werkt

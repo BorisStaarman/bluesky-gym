@@ -9,6 +9,8 @@ from bluesky_gym.envs.mvp_2d import MVP_2D
 import csv, os, shutil
 from collections import defaultdict 
 import time
+from bluesky_gym.kalman_filter import KalmanDenoiser
+
 
 # Code to train a Neural Network to behave like the MVP method. 
 # This is the first stage of the training process
@@ -64,13 +66,13 @@ CPA_TIME_HORIZON_S = 15 # seconds
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 10.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 5.0  # Scale factor for distance-to-waypoint progress
+WAYPOINT_REACHED_REWARD = 15.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 10.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
 BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
-PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary
+PROXIMITY_MAX_PENALTY = -4.0  # Maximum penalty when at hard boundary
 
 # logging
 LOG_EVERY_N = 100  # throttle repeated warnings
@@ -78,6 +80,25 @@ LOG_EVERY_N = 100  # throttle repeated warnings
 # Add a base dir for metrics written by this env
 # NOTE: This is just a fallback - metrics_base_dir is passed via env_config from main.py
 METRICS_BASE_DIR = "metrics"  # Fallback (not used when passed via env_config)
+
+class MyDroneController:
+    def __init__(self):
+        # Create once, reuse many times
+        self.kalman = KalmanDenoiser(process_noise_std=1.0)
+    
+    def get_clean_state(self, noisy_observations_normalized):
+        """
+        Parameters
+        ----------
+        noisy_observations_normalized : np.ndarray, shape (window_size, 4)
+            Recent noisy measurements in normalized [0,1] space
+        
+        Returns
+        -------
+        np.ndarray, shape (4,)
+            Clean estimate [x, y, vx, vy] in normalized space
+        """
+        return self.kalman.denoise(noisy_observations_normalized)
 
 class SectorEnv(MultiAgentEnv):
     metadata = {"name": "ma_env", "render_modes": ["rgb_array", "human"], "render_fps": 10}
@@ -197,6 +218,10 @@ class SectorEnv(MultiAgentEnv):
         self.max_dy = 0.0
         self.max_dvx = 0.0
         self.max_dvy = 0.0
+        
+        # Store noisy observations (consistent across all observers per timestep)
+        # Format: {agent_idx: {'pos': [x_noisy, y_noisy], 'vel': [vx_noisy, vy_noisy], 'gs_noisy': float}}
+        self._noisy_states = {}
 
     @staticmethod
     def compute_relative_position(center, lat, lon):
@@ -264,7 +289,18 @@ class SectorEnv(MultiAgentEnv):
         if self.render_mode == "human":
             self._render_frame()
 
-        observations = self._get_observation(self.agents)
+        # Generate clean observations FIRST for asymmetric actor-critic
+        self._generate_clean_states()
+        
+        # Generate noisy observations by adding noise to clean states
+        self._generate_noisy_observations()
+        
+        # Get noisy observations for actor
+        observations = self._get_observation(self.agents, use_clean_obs=False)
+        
+        # Get clean observations for critic
+        clean_observations = self._get_observation(self.agents, use_clean_obs=True)
+        
         self._update_obs_stats(observations)
         self._maybe_print_observations(observations, when="reset")
         # --- FIX: Calculate Teacher Action for the Reset Step ---
@@ -273,6 +309,8 @@ class SectorEnv(MultiAgentEnv):
             infos[agent] = {}
             # Calculate what the teacher would do NOW (at the start)
             infos[agent]["teacher_action"] = self._calculate_mvp_action(agent)
+            # Add clean observations for asymmetric actor-critic
+            infos[agent]["clean_obs"] = clean_observations[agent]
         
         
         return observations, infos
@@ -296,7 +334,18 @@ class SectorEnv(MultiAgentEnv):
             if agent in self._agent_steps:
                 self._agent_steps[agent] += 1
 
-        observations = self._get_observation(agents_in_step)
+        # Generate clean observations FIRST for asymmetric actor-critic
+        self._generate_clean_states()
+        
+        # Generate noisy observations by adding noise to clean states
+        self._generate_noisy_observations()
+        
+        # Get noisy observations for actor
+        observations = self._get_observation(agents_in_step, use_clean_obs=False)
+        
+        # Get clean observations for critic
+        clean_observations = self._get_observation(agents_in_step, use_clean_obs=True)
+        
         self._update_obs_stats(observations)
         self._env_step += 1
         self._maybe_print_observations(observations, when="step")
@@ -315,6 +364,9 @@ class SectorEnv(MultiAgentEnv):
             # 3. Store the teacher's answer in the info dict
             # This allows the Callback to find it later and pass it to the Loss Function
             infos[agent_id]["teacher_action"] = teacher_velocity
+            
+            # 4. Add clean observations for asymmetric actor-critic
+            infos[agent_id]["clean_obs"] = clean_observations[agent_id]
         # ==================================================================
         
         # Note: _pairs_penalized_this_step is cleared at the start of each step
@@ -1193,7 +1245,127 @@ class SectorEnv(MultiAgentEnv):
     #             # during development you could: raise
 
     #     return obs, risk_levels, most_risky
-    def _get_observation(self, active_agents):
+    
+    def _generate_clean_states(self):
+        """
+        Generate clean (ground truth) states for ALL agents once per timestep.
+        This is used for asymmetric actor-critic where the critic gets clean observations.
+        
+        Stores results in self._clean_states dictionary (same format as _noisy_states):
+        {agent_idx: {'pos': [x_m, y_m], 'vel': [vx_ms, vy_ms], 'gs': float}}
+        """
+        self._clean_states = {}
+        
+        for i in range(self.num_ac):
+            # Get true position (in meters from center) - NO NOISE
+            true_loc = fn.latlong_to_nm(
+                self.center, 
+                np.array([bs.traf.lat[i], bs.traf.lon[i]])
+            ) * NM2KM * 1000
+            
+            # Get true ground speed - NO NOISE
+            true_gs = bs.traf.gs[i]  # m/s
+            
+            # Calculate velocity components with true speed - NO NOISE
+            hdg = bs.traf.hdg[i]
+            vx = np.cos(np.deg2rad(hdg)) * true_gs
+            vy = np.sin(np.deg2rad(hdg)) * true_gs
+            
+            # Store clean observations for this agent
+            self._clean_states[i] = {
+                'pos': true_loc,  # [x, y] in meters
+                'vel': np.array([vx, vy]),  # [vx, vy] in m/s
+                'gs': true_gs  # scalar ground speed in m/s
+            }
+    
+    def _generate_noisy_observations(self):
+        """
+        Generate noisy observations by adding noise to clean states.
+        This ensures actor and critic use the SAME base data with noise added.
+        
+        IMPORTANT: Must call _generate_clean_states() FIRST!
+        
+        Noise specifications:
+        - Position: +/- 3.5m standard deviation (added in meters)
+        - Velocity: +/- 0.1 m/s standard deviation (added in m/s to each component)
+        
+        Stores results in self._noisy_states dictionary:
+        {agent_idx: {'pos': [x_noisy_m, y_noisy_m], 'vel': [vx_noisy_ms, vy_noisy_ms], 'gs_noisy': float}}
+        """
+        if not hasattr(self, '_clean_states') or not self._clean_states:
+            raise RuntimeError("_generate_clean_states() must be called before _generate_noisy_observations()!")
+        
+        self._noisy_states = {}
+        
+        for i in range(self.num_ac):
+            # Get clean state (generated from BlueSky in _generate_clean_states)
+            clean_state = self._clean_states[i]
+            
+            # Add noise to position (3.5m standard deviation in each direction)
+            pos_noise = np.random.normal(0, 3.5, size=2)  # [noise_x, noise_y] in meters
+            noisy_loc = clean_state['pos'] + pos_noise
+            
+            # Add noise to velocity components (0.1 m/s standard deviation in each direction)
+            # This is more realistic than adding noise to ground speed
+            vel_noise = np.random.normal(0, 0.1, size=2)  # [noise_vx, noise_vy] in m/s
+            noisy_vel = clean_state['vel'] + vel_noise
+            
+            # Calculate noisy ground speed from noisy velocity components
+            noisy_gs = np.linalg.norm(noisy_vel)
+            
+            # Store noisy observations for this agent
+            self._noisy_states[i] = {
+                'pos': noisy_loc,  # [x, y] in meters (clean + noise)
+                'vel': noisy_vel,  # [vx, vy] in m/s (clean + noise)
+                'gs_noisy': noisy_gs  # scalar ground speed in m/s (derived from noisy velocity)
+            }
+        
+        # VERIFICATION: Print noise check - REDUCED FREQUENCY for training
+        if not hasattr(self, '_noise_check_counter'):
+            self._noise_check_counter = 0
+        self._noise_check_counter += 1
+        
+        # Only print every 500 steps AND only in first 3 episodes (to verify noise is working)
+        if self._noise_check_counter % 500 == 1 and self._episode_index <= 3 and 0 in self._noisy_states:
+            agent_idx = 0
+            # Use clean states as ground truth (not BlueSky directly)
+            clean_loc = self._clean_states[agent_idx]['pos']
+            clean_vel = self._clean_states[agent_idx]['vel']
+            clean_gs = self._clean_states[agent_idx]['gs']
+            
+            noisy_loc = self._noisy_states[agent_idx]['pos']
+            noisy_vel = self._noisy_states[agent_idx]['vel']
+            noisy_gs = self._noisy_states[agent_idx]['gs_noisy']
+            
+            pos_error = np.linalg.norm(noisy_loc - clean_loc)
+            vel_error = np.linalg.norm(noisy_vel - clean_vel)
+            gs_error = abs(noisy_gs - clean_gs)
+            
+            print(f"\n[ASYMMETRIC AC NOISE CHECK - Step {self._noise_check_counter}] Agent {self.agents[0] if self.agents else 'N/A'}:")
+            print(f"  Clean position:  [{clean_loc[0]:7.2f}, {clean_loc[1]:7.2f}] m")
+            print(f"  Noisy position:  [{noisy_loc[0]:7.2f}, {noisy_loc[1]:7.2f}] m")
+            print(f"  Position error:  {pos_error:.3f} m (expected ~4.95m for 3.5m std in 2D)")
+            print(f"  Clean velocity:  [{clean_vel[0]:7.3f}, {clean_vel[1]:7.3f}] m/s")
+            print(f"  Noisy velocity:  [{noisy_vel[0]:7.3f}, {noisy_vel[1]:7.3f}] m/s")
+            print(f"  Velocity error:  {vel_error:.3f} m/s (expected ~0.14 m/s for 0.1 m/s std in 2D)")
+            print(f"  Ground speed error: {gs_error:.3f} m/s")
+            print(f"  ✓ Actor gets noisy obs, Critic gets clean obs (same base data)")
+    
+    def _get_observation(self, active_agents, use_clean_obs=False):
+        """
+        Build observation vector for active agents.
+        
+        Args:
+            active_agents: List of agent IDs to generate observations for
+            use_clean_obs: If True, use clean (ground truth) states instead of noisy states
+                          (for asymmetric actor-critic where critic gets clean observations)
+        
+        Returns:
+            Dictionary mapping agent_id -> observation vector
+        """
+        # Select which state dict to use
+        states_dict = self._clean_states if use_clean_obs else self._noisy_states
+        
         # code that builds the observation vector. 
         
         # origin reference for absolute positions
@@ -1221,16 +1393,22 @@ class SectorEnv(MultiAgentEnv):
                 cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
                 airspeed = bs.traf.tas[ac_idx] / 36.0 # normalize on to a max of 18 m/s (~35 kt)
                 
-                # Get ownship position in meters from center
-                ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
+                # Get ownship position and velocity (from cached states - clean or noisy)
+                # This ensures consistency: all agents see the SAME observation for this agent
+                if ac_idx in states_dict:
+                    ac_loc = states_dict[ac_idx]['pos']  # May include noise or be clean
+                    vx, vy = states_dict[ac_idx]['vel']  # May include noise or be clean
+                    ac_velocity = states_dict[ac_idx].get('gs_noisy', states_dict[ac_idx].get('gs'))  # Handle both dict formats
+                else:
+                    # Fallback if noisy states not generated (shouldn't happen)
+                    ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
+                    vx = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
+                    vy = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
+                    ac_velocity = bs.traf.gs[ac_idx]
                 
                 # Ownship position features (normalized, in meters from center)
                 dx = float(ac_loc[0]) / 8500.0
                 dy = float(ac_loc[1]) / 8000.0
-                
-                # Ownship velocity (raw m/s, will be normalized when constructing final vector)
-                vx = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
-                vy = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
                 
                 # maybe for determining the relative position of other ac
                 # own_lat = bs.traf.lat[ac_idx]
@@ -1254,13 +1432,21 @@ class SectorEnv(MultiAgentEnv):
                     # Get the BlueSky index for this agent
                     # i = agent_id_to_idx[other_agent_id]
                     other_agent_id = self.agents[i] if i < len(self.agents) else None
-                    int_hdg = bs.traf.hdg[i]
-                    int_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[i], bs.traf.lon[i]])) * NM2KM * 1000
+                    
+                    # Get intruder position and velocity (from cached states - clean or noisy)
+                    # This ensures consistency: all agents see the SAME observation
+                    if i in states_dict:
+                        int_loc = states_dict[i]['pos']  # May include noise or be clean
+                        vxi, vyi = states_dict[i]['vel']  # May include noise or be clean
+                    else:
+                        # Fallback if noisy states not generated (shouldn't happen)
+                        int_hdg = bs.traf.hdg[i]
+                        int_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[i], bs.traf.lon[i]])) * NM2KM * 1000
+                        vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
+                        vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]
+                    
                     dxi = float(int_loc[0] - ac_loc[0]) / 8500.0
                     dyi = float(int_loc[1] - ac_loc[1]) / 8000.0
-                    
-                    vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
-                    vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]
                     dvx = float(vxi - vx) / 36.0
                     dvy = float(vyi - vy) / 36.0
                     
@@ -1488,12 +1674,19 @@ class SectorEnv(MultiAgentEnv):
             distance_improvement = min_dist - current_dist
             self.min_distances[agent_id] = current_dist  # Update record
             
-            # Scale the progress reward
+            # Scale the progress reward 
             progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
             return progress_reward
-        else:
-            # No improvement on record distance - no reward
-            return 0.0
+        
+            
+        else: # No improvement on record distance - no reward
+            # 2. Add a tiny incentive to keep moving toward the target speed 
+            # even if not breaking a distance record
+            target_speed = 35.0 # knots
+            speed_error = abs((bs.traf.tas[ac_idx] * MpS2Kt) - target_speed)
+            progress_reward = -0.001 * speed_error # Very small penalty for slow flight
+        
+            return progress_reward
     
     def _check_path_efficiency(self, agent_id, ac_idx):
         # \"\"\"Reward for staying close to the straight-line path to waypoint.

@@ -66,9 +66,16 @@ def add_noise_to_trajectory(clean_traj, rng):
     return clean_traj + noise
 
 
-def collect_episode_trajectories(n_agents=20):
+def collect_episode_trajectories(n_agents=20, process_noise=1.0):
     """
     Run one episode with MVP and collect trajectories.
+    
+    Parameters
+    ----------
+    n_agents : int
+        Number of agents in the scenario
+    process_noise : float
+        Process noise std for Kalman filter
     
     Returns
     -------
@@ -135,12 +142,12 @@ def collect_episode_trajectories(n_agents=20):
         noisy_trajectories[agent_id] = add_noise_to_trajectory(clean_traj, rng)
     
     # Apply Kalman filter
-    print("Applying Kalman filter...")
+    print(f"Applying Kalman filter with process_noise={process_noise}...")
     kalman = KalmanDenoiser(
         dt=1.0,
         pos_noise_std=POS_NOISE_STD_M,
         vel_noise_std=VEL_NOISE_STD_MS,
-        process_noise_std=1.0,  # Optimal tuned value
+        process_noise_std=process_noise,
         x_norm=X_NORM,
         y_norm=Y_NORM,
         v_norm=V_NORM,
@@ -595,6 +602,8 @@ def main():
                        help="Total number of agents in episode (default: 20)")
     parser.add_argument("--n_plot", type=int, default=3,
                        help="Number of agents to plot (default: 3)")
+    parser.add_argument("--process_noise", type=float, default=1.0,
+                       help="Process noise std for Kalman filter (default: 1.0)")
     parser.add_argument("--output", type=str, default="kalman_trajectory_comparison.png",
                        help="Output filename (default: kalman_trajectory_comparison.png)")
     
@@ -605,10 +614,11 @@ def main():
     print(f"{'='*70}")
     print(f"  Total agents: {args.n_agents}")
     print(f"  Agents to plot: {args.n_plot}")
+    print(f"  Process noise: {args.process_noise}")
     print(f"  Output: {args.output}")
     
     # Collect trajectories
-    trajectories = collect_episode_trajectories(n_agents=args.n_agents)
+    trajectories = collect_episode_trajectories(n_agents=args.n_agents, process_noise=args.process_noise)
     
     # Plot
     plot_trajectories(trajectories, n_agents_to_plot=args.n_plot, save_path=args.output)

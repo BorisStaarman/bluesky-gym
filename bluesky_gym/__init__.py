@@ -76,11 +76,14 @@ def register_envs():
     # from bluesky_gym.envs.ma_env_SAC_AM import SectorEnv
     # from bluesky_gym.envs.ma_env_two_stage_AM_PPO import SectorEnv
     # from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE import SectorEnv
-    from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_ASSYMETRIC import SectorEnv
+    from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_kalman import SectorEnv
+    # from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_autoencoder import SectorEnv
+    # from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_ASSYMETRIC import SectorEnv
+    # from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_kalman_ASSYMETRIC import SectorEnv
     # from bluesky_gym.envs.ma_env_LSTM import SectorEnv
     # from bluesky_gym.envs.ma_env_ppo import SectorEnv
     # from bluesky_gym.envs.ma_env_two_stage import SectorEnv 
-  
+    
     # from bluesky_gym.envs.ma_env_two_stage_AM import SectorEnv
     
     # from bluesky_gym.envs.ma_env_ppo_AM import SectorEnv
