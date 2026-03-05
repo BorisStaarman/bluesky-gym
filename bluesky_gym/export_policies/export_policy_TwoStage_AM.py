@@ -310,15 +310,61 @@ runtime_env = {
 # This exports the best checkpoint from 1_9_PPO training
 
 #UNCOMMENT THE FOLLOWING BIT TO EXPORT STAGE 2 MODEL PPO 
+# print("\n" + "="*70)
+# print("🚀 EXPORTING STAGE 2 (RL FINE-TUNED) MODEL")
+# print("="*70)
+
+# # Export the best Stage 2 checkpoint from 1_9_PPO
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\Noise\Kalman\Test_TwoStage_PPO_AM_assymetricAC\models\sectorcr_ma_sac\best_iter_00089",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_PPO_noise_assymetric.pt",
+#     env_creator=sector_env_creator,
+#     runtime_env=runtime_env
+# )
+
+# print("\n" + "="*70)
+# print("✅ STAGE 2 EXPORT COMPLETE")
+# print("   Model saved to: models_boris/Two_stage_AM_Stage2_iter112.pt")
+# print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
+# print("="*70)
+
+# # ================================ EXPORT STAGE 2 MODEL noise symetric getraind op de server==================================
+# # STAGE 2 getraind op server voor 110 iteraties
+
+# #UNCOMMENT THE FOLLOWING BIT TO EXPORT STAGE 2 MODEL PPO 
+# print("\n" + "="*70)
+# print("🚀 EXPORTING STAGE 2 (RL FINE-TUNED) MODEL")
+# print("="*70)
+
+# # Export the best Stage 2 checkpoint from 1_9_PPO
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\models\server\best_iter_00110",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\PPO_symmetric_noise_server.pt",
+#     env_creator=sector_env_creator,
+#     runtime_env=runtime_env
+# )
+
+# print("\n" + "="*70)
+# print("✅ STAGE 2 EXPORT COMPLETE")
+# print("   Model saved to: models_boris/Two_stage_AM_Stage2_iter112.pt")
+# print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
+# print("="*70)
+
+
+# ================================ EXPORT STAGE 2 MODEL no noise. getraind zonder pretraining==================================
+
+#UNCOMMENT THE FOLLOWING BIT TO EXPORT STAGE 2 MODEL PPO 
 print("\n" + "="*70)
 print("🚀 EXPORTING STAGE 2 (RL FINE-TUNED) MODEL")
 print("="*70)
 
 # Export the best Stage 2 checkpoint from 1_9_PPO
 export_policy_torch_old_api(
-    r"C:\Users\boris\Documents\bsgym\bluesky-gym\Noise\Kalman\Test_TwoStage_PPO_AM_assymetricAC\models\sectorcr_ma_sac\best_iter_00089",
+    r"C:\Users\boris\Documents\bsgym\bluesky-gym\First_Stage_AM\19_2_PPO\models\sectorcr_ma_sac\best_iter_00090",
     "shared_policy",
-    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_PPO_noise_assymetric.pt",
+    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\PPO_NoNoise_NoPretraining.pt",
     env_creator=sector_env_creator,
     runtime_env=runtime_env
 )
@@ -328,8 +374,6 @@ print("✅ STAGE 2 EXPORT COMPLETE")
 print("   Model saved to: models_boris/Two_stage_AM_Stage2_iter112.pt")
 print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
 print("="*70)
-
-
 
 
 # ===================== EXPORT SAC AM PRE-TRAINED MODEL ==========================

@@ -7,16 +7,8 @@ from bluesky_gym.envs.common.screen_dummy import ScreenDummy
 import bluesky_gym.envs.common.functions as fn
 from bluesky_gym.envs.mvp_2d import MVP_2D
 import csv, os, shutil
-from collections import defaultdict, deque
+from collections import defaultdict 
 import time
-from bluesky_gym.kalman_filter import KalmanDenoiser
-
-try:
-    import torch
-    _TORCH_AVAILABLE = True
-except ImportError:
-    _TORCH_AVAILABLE = False
-
 
 # Code to train a Neural Network to behave like the MVP method. 
 # This is the first stage of the training process
@@ -72,13 +64,13 @@ CPA_TIME_HORIZON_S = 15 # seconds
 DRIFT_PENALTY = -0.003  # Small penalty for heading deviation
 STEP_PENALTY = -0.01  # Small penalty per timestep to encourage efficiency
 WAYPOINT_RADIUS = 0.05  # NM - radius to consider waypoint reached (~90 meters)
-WAYPOINT_REACHED_REWARD = 15.0  # Reward for reaching waypoint
-PROGRESS_REWARD_SCALE = 10.0  # Scale factor for distance-to-waypoint progress
+WAYPOINT_REACHED_REWARD = 10.0  # Reward for reaching waypoint
+PROGRESS_REWARD_SCALE = 5.0  # Scale factor for distance-to-waypoint progress
 PATH_EFFICIENCY_SCALE = 0.0  # Disabled (set to 0) - can re-enable later for experiments
 BOUNDARY_VIOLATION_PENALTY = -3.0  # Penalty for leaving polygon boundary (not at waypoint)
 SOFT_INTRUSION_FACTOR = 1.5  # Soft zone starts at 1.5x the intrusion distance
 INTRUSION_PENALTY = -15.0  # Separation violation - penalty applied every timestep during intrusion
-PROXIMITY_MAX_PENALTY = -4.0  # Maximum penalty when at hard boundary
+PROXIMITY_MAX_PENALTY = -1.0  # Maximum penalty when at hard boundary
 
 # logging
 LOG_EVERY_N = 100  # throttle repeated warnings
@@ -87,43 +79,13 @@ LOG_EVERY_N = 100  # throttle repeated warnings
 # NOTE: This is just a fallback - metrics_base_dir is passed via env_config from main.py
 METRICS_BASE_DIR = "metrics"  # Fallback (not used when passed via env_config)
 
-# Autoencoder (AE) sliding window settings
-AE_WINDOW_SIZE = 5       # Number of past timesteps to keep per agent (per MAFTRL paper)
-AE_FEATURES = 4          # Features per timestep: [Δx_norm, Δy_norm, vx_norm, vy_norm]
-AE_INPUT_DIM = AE_WINDOW_SIZE * AE_FEATURES  # Flat AE input dimension (= 20)
-AE_MSE_SCALE = 0.08      # Divisor to normalize raw MSE to ~ [0, 1] for delta-normalised features
-                         # Clean MSE ~0.0015 → signal ~0.02; Noisy MSE ~0.045 → signal ~0.56
-# Delta-feature normalization (physical units, must match bluesky_gym/autoencoder.py)
-AE_DELTA_NORM = 15.0     # m   — one timestep of motion at ~max speed; scales Δpos
-AE_VEL_NORM   = 15.0     # m/s — ~max UAV speed; scales vx / vy
-
-class MyDroneController:
-    def __init__(self):
-        # Create once, reuse many times
-        self.kalman = KalmanDenoiser(process_noise_std=1.0)
-    
-    def get_clean_state(self, noisy_observations_normalized):
-        """
-        Parameters
-        ----------
-        noisy_observations_normalized : np.ndarray, shape (window_size, 4)
-            Recent noisy measurements in normalized [0,1] space
-        
-        Returns
-        -------
-        np.ndarray, shape (4,)
-            Clean estimate [x, y, vx, vy] in normalized space
-        """
-        return self.kalman.denoise(noisy_observations_normalized)
-
 class SectorEnv(MultiAgentEnv):
     metadata = {"name": "ma_env", "render_modes": ["rgb_array", "human"], "render_fps": 10}
 
     def __init__(self, render_mode=None, n_agents=30, run_id="default",
                  debug_obs=False, debug_obs_episodes=2, debug_obs_interval=1, debug_obs_agents=None,
                  collect_obs_stats=False, print_obs_stats_per_episode=False,
-                 intrusion_penalty=None, proximity_max_penalty=None, metrics_base_dir=None, center=None,
-                 autoencoder_path=None):
+                 intrusion_penalty=None, proximity_max_penalty=None, metrics_base_dir=None, center=None):
         super().__init__()
         
         self.render_mode = render_mode
@@ -201,7 +163,7 @@ class SectorEnv(MultiAgentEnv):
         self._rewards_counts = {}              # per-agent step counts for safe averaging
         self._intrusions_acc = {}              # per-agent intrusion counts during the episode
                 
-        single_obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(8 + 5 * NUM_AC_STATE,), dtype=np.float32)
+        single_obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(7 + 5 * NUM_AC_STATE,), dtype=np.float32)
         single_action_space = spaces.Box(-1, 1, shape=(2,), dtype=np.float32)
         
         self.areas_km2 = []
@@ -235,21 +197,6 @@ class SectorEnv(MultiAgentEnv):
         self.max_dy = 0.0
         self.max_dvx = 0.0
         self.max_dvy = 0.0
-        
-        # Store noisy observations (consistent across all observers per timestep)
-        # Format: {agent_idx: {'pos': [x_noisy, y_noisy], 'vel': [vx_noisy, vy_noisy], 'gs_noisy': float}}
-        self._noisy_states = {}
-
-        # Autoencoder noise detection
-        self._ae_model = None            # Loaded via self.load_autoencoder()
-        self._ae_window_size = AE_WINDOW_SIZE
-        # Per-agent sliding window: {agent_id: deque(maxlen=AE_WINDOW_SIZE)}
-        # Initialised/reset in reset() so each episode starts fresh.
-        self._obs_windows = {}
-
-        # Auto-load AE model if path was provided (e.g. from env_config)
-        if autoencoder_path is not None:
-            self.load_autoencoder(autoencoder_path)
 
     @staticmethod
     def compute_relative_position(center, lat, lon):
@@ -276,13 +223,13 @@ class SectorEnv(MultiAgentEnv):
         self._env_step = 0
         
         # Print max observation values for normalization analysis (every 100 episodes)
-        # if self._episode_index % 100 == 0:
-        #     print(f"\n[Episode {self._episode_index}] Max observation values:")
-        #     print(f"  max_d_now:  {self.max_d_now:.4f} m")
-        #     print(f"  max_dx:     {self.max_dx:.4f} m")
-        #     print(f"  max_dy:     {self.max_dy:.4f} m")
-        #     print(f"  max_dvx:    {self.max_dvx:.4f} m/s")
-        #     print(f"  max_dvy:    {self.max_dvy:.4f} m/s")
+        if self._episode_index % 100 == 0:
+            print(f"\n[Episode {self._episode_index}] Max observation values:")
+            print(f"  max_d_now:  {self.max_d_now:.4f} m")
+            print(f"  max_dx:     {self.max_dx:.4f} m")
+            print(f"  max_dy:     {self.max_dy:.4f} m")
+            print(f"  max_dvx:    {self.max_dvx:.4f} m/s")
+            print(f"  max_dvy:    {self.max_dvy:.4f} m/s")
         # for savin  data in csv file
         self._agent_steps = {a: 0 for a in self.agents}
         self._rewards_acc = {a: {"drift": 0.0, "progress": 0.0, "intrusion": 0.0, "path_efficiency": 0.0, "boundary": 0.0, "step": 0.0, "proximity": 0.0} for a in self.agents}
@@ -304,11 +251,6 @@ class SectorEnv(MultiAgentEnv):
         self._generate_waypoints()
         self._generate_ac()
 
-        # Reset per-agent sliding windows for AE noise detection
-        self._obs_windows = {
-            agent: deque(maxlen=self._ae_window_size) for agent in self.agents
-        }
-
         for agent in self.agents:
             try:
                 ac_idx = bs.traf.id2idx(agent)
@@ -322,9 +264,6 @@ class SectorEnv(MultiAgentEnv):
         if self.render_mode == "human":
             self._render_frame()
 
-        # Generate noisy observations for all agents (ONCE per timestep)
-        self._generate_noisy_observations()
-        
         observations = self._get_observation(self.agents)
         self._update_obs_stats(observations)
         self._maybe_print_observations(observations, when="reset")
@@ -357,9 +296,6 @@ class SectorEnv(MultiAgentEnv):
             if agent in self._agent_steps:
                 self._agent_steps[agent] += 1
 
-        # Generate noisy observations for all agents (ONCE per timestep)
-        self._generate_noisy_observations()
-        
         observations = self._get_observation(agents_in_step)
         self._update_obs_stats(observations)
         self._env_step += 1
@@ -1257,180 +1193,6 @@ class SectorEnv(MultiAgentEnv):
     #             # during development you could: raise
 
     #     return obs, risk_levels, most_risky
-    
-    # ------------------------------------------------------------------
-    # Autoencoder (AE) noise-detection helpers
-    # ------------------------------------------------------------------
-
-    def load_autoencoder(self, model_path, device='cpu'):
-        """Load a pretrained Autoencoder from disk for noise-signal inference.
-
-        The model must accept a flat input of shape
-        ``(batch, AE_INPUT_DIM)`` where ``AE_INPUT_DIM = AE_WINDOW_SIZE * AE_FEATURES = 20``,
-        and produce a reconstruction of the *same* shape.
-
-        Args:
-            model_path (str): Path to the saved PyTorch model (.pt / .pth).
-            device (str): Device to load onto (``'cpu'`` or ``'cuda'``).
-        """
-        if not _TORCH_AVAILABLE:
-            print("[AE] PyTorch is not installed – cannot load autoencoder.")
-            return
-        try:
-            self._ae_model = torch.load(model_path, map_location=device, weights_only=False)
-            self._ae_model.eval()
-            # Freeze all parameters so no gradients are tracked
-            for p in self._ae_model.parameters():
-                p.requires_grad = False
-            print(
-                f"[AE] Loaded & froze autoencoder from '{model_path}' "
-                f"(input_dim={AE_INPUT_DIM}, window={AE_WINDOW_SIZE}×{AE_FEATURES})"
-            )
-        except Exception as e:
-            print(f"[AE] Failed to load autoencoder from '{model_path}': {e}")
-            self._ae_model = None
-
-    def _update_obs_window(self, agent_id, ac_idx):
-        """Append the latest raw physical ownship state to the agent's sliding window.
-
-        Stores 4 values in *physical units* per timestep:
-            ``[x_m, y_m, vx_ms, vy_ms]``
-        Delta conversion and normalisation happen in ``_compute_ae_noise_signal``
-        to keep the deque independent of the AE's normalisation scheme.
-
-        Args:
-            agent_id (str): Agent identifier (e.g. ``'KL001'``).
-            ac_idx (int): BlueSky traffic array index for the agent.
-        """
-        if agent_id not in self._obs_windows:
-            return
-        if ac_idx not in self._noisy_states:
-            return
-
-        # Store raw physical values (metres and m/s) — NOT arena-normalised
-        x_m, y_m = self._noisy_states[ac_idx]['pos']
-        vx_ms, vy_ms = self._noisy_states[ac_idx]['vel']
-
-        frame = np.array([x_m, y_m, vx_ms, vy_ms], dtype=np.float32)
-        self._obs_windows[agent_id].append(frame)
-
-    def _compute_ae_noise_signal(self, agent_id):
-        """Compute a physical-inconsistency noise signal via AE reconstruction error.
-
-        Takes the current sliding window for ``agent_id``, converts it to
-        *delta-normalised* features, passes it through the pretrained frozen
-        Autoencoder, and returns the MSE between input and reconstruction.
-
-        Feature representation per timestep:
-            [Δx / AE_DELTA_NORM,  Δy / AE_DELTA_NORM,  vx / AE_VEL_NORM,  vy / AE_VEL_NORM]
-        Timestep 0 has Δx = Δy = 0 (no predecessor).  With AE_DELTA_NORM=15m:
-            clean motion delta ≈ 0.60,  noise delta ≈ 0.33  (55 % noise-to-signal).
-
-        Returns:
-            float: Normalised MSE in ``[0, 1]``.
-                   Returns ``0.0`` if the AE is not loaded or the window is not full yet.
-        """
-        if self._ae_model is None:
-            return 0.0
-
-        window = self._obs_windows.get(agent_id)
-        if window is None or len(window) < self._ae_window_size:
-            # Not enough history yet – return neutral signal
-            return 0.0
-
-        # raw_window: (5, 4) in physical units [x_m, y_m, vx_ms, vy_ms]
-        raw = np.array(list(window), dtype=np.float32)
-
-        # Build delta-normalised AE input (5, 4)
-        ae_input = np.zeros_like(raw)
-        # Timestep 0: anchor frame — no position delta, only velocity
-        ae_input[0, 2] = raw[0, 2] / AE_VEL_NORM
-        ae_input[0, 3] = raw[0, 3] / AE_VEL_NORM
-        for t in range(1, self._ae_window_size):
-            ae_input[t, 0] = (raw[t, 0] - raw[t - 1, 0]) / AE_DELTA_NORM
-            ae_input[t, 1] = (raw[t, 1] - raw[t - 1, 1]) / AE_DELTA_NORM
-            ae_input[t, 2] = raw[t, 2] / AE_VEL_NORM
-            ae_input[t, 3] = raw[t, 3] / AE_VEL_NORM
-
-        x = torch.tensor(ae_input.flatten(), dtype=torch.float32).unsqueeze(0)  # (1, 20)
-
-        with torch.no_grad():
-            x_rec = self._ae_model(x)  # (1, 20)
-
-        mse = float(torch.mean((x - x_rec) ** 2).item())
-        # Normalize by AE_MSE_SCALE and clip to [0, 1] for stable policy input
-        return float(np.clip(mse / AE_MSE_SCALE, 0.0, 1.0))
-
-    # ------------------------------------------------------------------
-
-    def _generate_noisy_observations(self):
-        """
-        Generate noisy observations for ALL agents once per timestep.
-        This ensures that all agents see the SAME noisy observation for each other agent.
-        
-        Stores results in self._noisy_states dictionary:
-        {agent_idx: {'pos': [x_noisy_m, y_noisy_m], 'vel': [vx_noisy_ms, vy_noisy_ms], 'gs_noisy': float}}
-        """
-        self._noisy_states = {}
-        
-        for i in range(self.num_ac):
-            # Get true position (in meters from center)
-            true_loc = fn.latlong_to_nm(
-                self.center, 
-                np.array([bs.traf.lat[i], bs.traf.lon[i]])
-            ) * NM2KM * 1000
-            
-            # Add noise to position (3.5m standard deviation)
-            pos_noise = np.random.normal(0, 3.5, size=2)
-            noisy_loc = true_loc + pos_noise
-            
-            # Get true ground speed
-            true_gs = bs.traf.gs[i]  # m/s
-            
-            # Add noise to speed (0.1 m/s standard deviation)
-            # Note: Using 0.1 m/s instead of 5 m/s as velocity sensor is more accurate
-            gs_noise = np.random.normal(0, 0.1)
-            noisy_gs = true_gs + gs_noise
-            
-            # Calculate velocity components with noisy speed
-            hdg = bs.traf.hdg[i]
-            vx_noisy = np.cos(np.deg2rad(hdg)) * noisy_gs
-            vy_noisy = np.sin(np.deg2rad(hdg)) * noisy_gs
-            
-            # Store noisy observations for this agent
-            self._noisy_states[i] = {
-                'pos': noisy_loc,  # [x, y] in meters
-                'vel': np.array([vx_noisy, vy_noisy]),  # [vx, vy] in m/s
-                'gs_noisy': noisy_gs  # scalar ground speed in m/s
-            }
-        
-        # VERIFICATION: Print noise check - REDUCED FREQUENCY for training
-        if not hasattr(self, '_noise_check_counter'):
-            self._noise_check_counter = 0
-        self._noise_check_counter += 1
-        
-        # Only print every 500 steps AND only in first 3 episodes (to verify noise is working)
-        if self._noise_check_counter % 500 == 1 and self._episode_index <= 3 and 0 in self._noisy_states:
-            agent_idx = 0
-            true_loc = fn.latlong_to_nm(
-                self.center, 
-                np.array([bs.traf.lat[agent_idx], bs.traf.lon[agent_idx]])
-            ) * NM2KM * 1000
-            noisy_loc = self._noisy_states[agent_idx]['pos']
-            pos_error = np.linalg.norm(noisy_loc - true_loc)
-            
-            true_gs = bs.traf.gs[agent_idx]
-            noisy_gs = self._noisy_states[agent_idx]['gs_noisy']
-            vel_error = abs(noisy_gs - true_gs)
-            
-            print(f"\n[NOISE CHECK - Step {self._noise_check_counter}] Agent {self.agents[0] if self.agents else 'N/A'}:")
-            print(f"  True position:  [{true_loc[0]:7.2f}, {true_loc[1]:7.2f}] m")
-            print(f"  Noisy position: [{noisy_loc[0]:7.2f}, {noisy_loc[1]:7.2f}] m")
-            print(f"  Position error: {pos_error:.3f} m (should be ~3.5m std)")
-            print(f"  True speed:     {true_gs:.3f} m/s")
-            print(f"  Noisy speed:    {noisy_gs:.3f} m/s")
-            print(f"  Speed error:    {vel_error:.3f} m/s (should be ~0.1 m/s std)")
-    
     def _get_observation(self, active_agents):
         # code that builds the observation vector. 
         
@@ -1439,8 +1201,8 @@ class SectorEnv(MultiAgentEnv):
         x_origin = self.center[1]
         
         # observation vector
-        # 8 ownship features (7 state + 1 AE noise signal) + 5 features per intruder
-        dim = 8 + 5 * NUM_AC_STATE
+        # 7 ownship features + 5 features per intruder (distance, dx_rel, dy_rel, vx_rel, vy_rel)
+        dim = 7 + 5 * NUM_AC_STATE
         obs = {}
 
         if not hasattr(self, "_obs_errors"):
@@ -1459,22 +1221,16 @@ class SectorEnv(MultiAgentEnv):
                 cos_drift, sin_drift = np.cos(np.deg2rad(drift)), np.sin(np.deg2rad(drift))
                 airspeed = bs.traf.tas[ac_idx] / 36.0 # normalize on to a max of 18 m/s (~35 kt)
                 
-                # Get noisy ownship position and velocity (from cached noisy states)
-                # This ensures consistency: all agents see the SAME noisy position for this agent
-                if ac_idx in self._noisy_states:
-                    ac_loc = self._noisy_states[ac_idx]['pos']  # Already includes noise
-                    vx, vy = self._noisy_states[ac_idx]['vel']  # Already includes noise
-                    ac_velocity = self._noisy_states[ac_idx]['gs_noisy']  # Noisy ground speed
-                else:
-                    # Fallback if noisy states not generated (shouldn't happen)
-                    ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
-                    vx = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
-                    vy = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
-                    ac_velocity = bs.traf.gs[ac_idx]
+                # Get ownship position in meters from center
+                ac_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[ac_idx], bs.traf.lon[ac_idx]])) * NM2KM * 1000
                 
                 # Ownship position features (normalized, in meters from center)
                 dx = float(ac_loc[0]) / 8500.0
                 dy = float(ac_loc[1]) / 8000.0
+                
+                # Ownship velocity (raw m/s, will be normalized when constructing final vector)
+                vx = np.cos(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
+                vy = np.sin(np.deg2rad(ac_hdg)) * bs.traf.gs[ac_idx]
                 
                 # maybe for determining the relative position of other ac
                 # own_lat = bs.traf.lat[ac_idx]
@@ -1498,21 +1254,13 @@ class SectorEnv(MultiAgentEnv):
                     # Get the BlueSky index for this agent
                     # i = agent_id_to_idx[other_agent_id]
                     other_agent_id = self.agents[i] if i < len(self.agents) else None
-                    
-                    # Get noisy intruder position and velocity (from cached noisy states)
-                    # This ensures consistency: all agents see the SAME noisy observation
-                    if i in self._noisy_states:
-                        int_loc = self._noisy_states[i]['pos']  # Already includes noise
-                        vxi, vyi = self._noisy_states[i]['vel']  # Already includes noise
-                    else:
-                        # Fallback if noisy states not generated (shouldn't happen)
-                        int_hdg = bs.traf.hdg[i]
-                        int_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[i], bs.traf.lon[i]])) * NM2KM * 1000
-                        vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
-                        vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]
-                    
+                    int_hdg = bs.traf.hdg[i]
+                    int_loc = fn.latlong_to_nm(self.center, np.array([bs.traf.lat[i], bs.traf.lon[i]])) * NM2KM * 1000
                     dxi = float(int_loc[0] - ac_loc[0]) / 8500.0
                     dyi = float(int_loc[1] - ac_loc[1]) / 8000.0
+                    
+                    vxi = np.cos(np.deg2rad(int_hdg)) * bs.traf.gs[i]
+                    vyi = np.sin(np.deg2rad(int_hdg)) * bs.traf.gs[i]
                     dvx = float(vxi - vx) / 36.0
                     dvy = float(vyi - vy) / 36.0
                     
@@ -1562,17 +1310,8 @@ class SectorEnv(MultiAgentEnv):
                         # Padding (5 zeros per missing agent)
                         intruder_features.extend([0.0] * 5)
 
-                # Update AE sliding window with the latest noisy ownship state,
-                # then compute physical-inconsistency noise signal.
-                self._update_obs_window(agent, ac_idx)
-                ae_signal = self._compute_ae_noise_signal(agent)
-
                 # Concatenate Ownship + Intruders
-                # ownship_feats has 8 elements: 7 state features + 1 AE noise signal
-                ownship_feats = np.array(
-                    [cos_drift, sin_drift, airspeed, dx, dy, vx / 36.0, vy / 36.0, ae_signal],
-                    dtype=np.float32
-                )
+                ownship_feats = np.array([cos_drift, sin_drift, airspeed, dx, dy, vx / 36.0, vy / 36.0], dtype=np.float32)
                 intruder_feats = np.array(intruder_features, dtype=np.float32)
                 
                 vec = np.concatenate([ownship_feats, intruder_feats])
@@ -1749,19 +1488,12 @@ class SectorEnv(MultiAgentEnv):
             distance_improvement = min_dist - current_dist
             self.min_distances[agent_id] = current_dist  # Update record
             
-            # Scale the progress reward 
+            # Scale the progress reward
             progress_reward = distance_improvement * PROGRESS_REWARD_SCALE
             return progress_reward
-        
-            
-        else: # No improvement on record distance - no reward
-            # 2. Add a tiny incentive to keep moving toward the target speed 
-            # even if not breaking a distance record
-            target_speed = 35.0 # knots
-            speed_error = abs((bs.traf.tas[ac_idx] * MpS2Kt) - target_speed)
-            progress_reward = -0.001 * speed_error # Very small penalty for slow flight
-        
-            return progress_reward
+        else:
+            # No improvement on record distance - no reward
+            return 0.0
     
     def _check_path_efficiency(self, agent_id, ac_idx):
         # \"\"\"Reward for staying close to the straight-line path to waypoint.

@@ -6,4 +6,4 @@ Eerste training run werkte niet goed, beetje onstabiel. Nog een keer proberen me
 
 ------------ ppo  kalman --------------------
 gebasseerd op ppo assymetrc kalman
-kijken of de training hier beter werkt
+kijken of de training hier beter werkt, model doet moeiljk met rare rewards. 

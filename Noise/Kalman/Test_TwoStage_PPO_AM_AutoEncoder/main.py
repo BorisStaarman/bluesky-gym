@@ -121,12 +121,12 @@ RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1, False to only tr
 iterations_stage1 = 80  # Number of iterations for Stage 1 imitation learning
 
 # --- WARM-UP PHASE SETTINGS ---
-WARMUP_ITERATIONS = 10  #10 :::: Number of iterations to warm up critic with frozen policy and attention
-WARMUP_LR = 1e-4  # Critic needs higher LR to learn from scratch (was 3e-5, still too low)
+WARMUP_ITERATIONS = 10  # Number of iterations to warm up critic with frozen policy and attention
+WARMUP_LR = 1e-4  # Critic needs higher LR to learn from scratch
 FINETUNE_LR = 5e-5  # Learning rate after warm-up for joint optimization
 
 # --- STAGE 2: RL FINE-TUNING (PPO with standard loss) ---
-TOTAL_ITERS = WARMUP_ITERATIONS + 80 # + 80  # Maximum total iterations for Stage 2
+TOTAL_ITERS = WARMUP_ITERATIONS + 80  # Maximum total iterations for Stage 2
 
 EVALUATION_INTERVAL = 10
 
@@ -150,7 +150,7 @@ def _find_latest_checkpoint(base_dir: str) -> str | None:
         # Skip the stage1_best_weights directory entirely
         if os.path.abspath(root).startswith(os.path.abspath(stage1_dir)):
             continue
-        if "rllib_checkpoint.json" in files:
+        if "rllib_checkpoint.json" in files and "algorithm_state.pkl" in files:
             fpath = os.path.join(root, "rllib_checkpoint.json")
             try:
                 mtime = os.path.getmtime(fpath)
@@ -321,7 +321,7 @@ def build_trainer(n_agents, stage=1, restore_path=None):
         
         training_config = {
             "lr": WARMUP_LR,  # Start with higher LR for critic learning during warm-up
-            "train_batch_size": 32000,
+            "train_batch_size": 64000,
             "minibatch_size": 2000,
             "num_sgd_iter": 12,
             "clip_param": 0.2,
@@ -417,6 +417,21 @@ def build_trainer(n_agents, stage=1, restore_path=None):
     # 6. Restore Weights (if provided)
     if restore_path:
         print(f"Restoring weights from: {restore_path}")
+        # Peek at the temperature stored in the checkpoint BEFORE restoring
+        try:
+            import pickle
+            _pkl = os.path.join(restore_path, "policies", "shared_policy", "policy_state.pkl")
+            if os.path.isfile(_pkl):
+                with open(_pkl, "rb") as _f:
+                    _state = pickle.load(_f)
+                _temp_val = _state.get("weights", {}).get("temperature")
+                if _temp_val is not None:
+                    _t = float(np.array(_temp_val).ravel()[0])
+                    print(f"[Restore] Checkpoint temperature value (Stage 1 trained): {_t:.4f}")
+                else:
+                    print(f"[Restore] 'temperature' key not found in checkpoint weights.")
+        except Exception as _e:
+            print(f"[Restore] Could not peek at checkpoint temperature: {_e}")
         try:
             algo.restore(restore_path)
             print(f"[Restore] Full restore succeeded.")
@@ -451,6 +466,18 @@ def build_trainer(n_agents, stage=1, restore_path=None):
                 print(f"[Config] Reset log_std after restore: {old_val:.3f} → {new_val:.3f}")
             else:
                 print(f"[WARNING] Could not reset log_std after restore")
+
+            # Reset attention temperature to 3.0.
+            # Stage 1 drifts temperature to ~15, and Adam's accumulated second-moment
+            # (v) from Stage 1 would freeze the temperature update in Stage 2 if left.
+            # The partial restore clears Adam state, so resetting temperature to 3.0
+            # lets Stage 2 learn it naturally from scratch — matching the good non-AE runs.
+            if hasattr(model, 'temperature'):
+                with torch.no_grad():
+                    old_temp = model.temperature.item()
+                    model.temperature.fill_(3.0)
+                    new_temp = model.temperature.item()
+                print(f"[Config] Reset attention temperature after restore: {old_temp:.3f} → {new_temp:.3f}")
 
     return algo
 
@@ -663,7 +690,7 @@ if __name__ == "__main__":
     elif RUN_STAGE_2 and not run_stage1:
         # No Stage 2 checkpoint found and Stage 1 won't run — try to load Stage 1 best weights
         s1_ckpt = os.path.join(CHECKPOINT_DIR, "stage1_best_weights")
-        if os.path.isfile(os.path.join(s1_ckpt, "rllib_checkpoint.json")):
+        if os.path.isfile(os.path.join(s1_ckpt, "rllib_checkpoint.json")) and os.path.isfile(os.path.join(s1_ckpt, "algorithm_state.pkl")):
             print(f"📦 No Stage 2 checkpoint found. Loading Stage 1 weights for Stage 2: {s1_ckpt}")
             restored_from = s1_ckpt
         else:
@@ -848,39 +875,28 @@ if __name__ == "__main__":
 
     # --- Main Training Loop ---
     for i in range(1, target_iters+1):
-        # Check if we need to increase LR and entropy after warm-up
+        # --- LR update: once at warmup boundary ---
         if i == WARMUP_ITERATIONS + 1 and not warmup_complete:
             warmup_complete = True
             print(f"\n{'='*60}")
             print(f"🔥 FINE-TUNING PHASE: Warm-up complete!")
             print(f"   Increasing learning rate: {WARMUP_LR:.2e} → {FINETUNE_LR:.2e}")
-            print(f"   Increasing log_std: -2.5 → 0.0 (enabling exploration)")
-            print(f"   Note: entropy_coeff stays at {algo.config.entropy_coeff} (can't change after init)")
-            print(f"   Critic has learned to evaluate policy, now jointly optimizing")
+            print(f"   log_std will anneal from {LOG_STD_START} → {LOG_STD_END} over {LOG_STD_ANNEAL_ITERS} iters")
             print(f"{'='*60}\n")
-            
-            # Update learning rate by accessing worker's policy optimizer
+
             policy = algo.get_policy("shared_policy")
-            
-            # Try multiple paths to find the optimizer
             optimizer_found = False
-            
-            # Try _optimizer attribute first (most common in old API)
             if hasattr(policy, '_optimizer') and policy._optimizer is not None:
                 for param_group in policy._optimizer.param_groups:
                     param_group['lr'] = FINETUNE_LR
                 optimizer_found = True
                 print(f"✅ Learning rate updated via policy._optimizer")
-            
-            # Try _optimizers (sometimes it's a list)
             elif hasattr(policy, '_optimizers') and len(policy._optimizers) > 0:
                 for opt in policy._optimizers:
                     for param_group in opt.param_groups:
                         param_group['lr'] = FINETUNE_LR
                 optimizer_found = True
                 print(f"✅ Learning rate updated via policy._optimizers")
-            
-            # Last resort: rebuild config with new LR (not ideal but works)
             if not optimizer_found:
                 print(f"⚠️  WARNING: Could not find optimizer directly")
                 print(f"   Learning rate will stay at {WARMUP_LR:.2e}")

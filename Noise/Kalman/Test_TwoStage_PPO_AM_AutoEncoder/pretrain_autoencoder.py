@@ -339,14 +339,39 @@ def validate_clean_vs_noisy(model: FlightAutoencoder,
         print("  ⚠️  Weak separation — consider more training data or tuning architecture.")
 
     # ── Histogram ──
-    plt.figure(figsize=(8, 4))
-    plt.hist(mse_clean, bins=60, alpha=0.6, label=f"Clean (μ={mse_clean.mean():.5f})")
-    plt.hist(mse_noisy, bins=60, alpha=0.6, label=f"Noisy (μ={mse_noisy.mean():.5f})")
-    plt.xlabel("Reconstruction MSE");  plt.ylabel("Count")
-    plt.title("AE Reconstruction Error: Clean vs Noisy Data")
-    plt.legend();  plt.grid(True);  plt.tight_layout()
+    AE_MSE_SCALE = 0.08   # must match the constant in the env file
+    X_MAX = 0.15          # clip x-axis so the clean peak is clearly visible
+
+    # Bin edges shared across both distributions so bars are comparable
+    bin_edges = np.linspace(0, X_MAX, 80)
+
+    fig, ax1 = plt.subplots(figsize=(9, 5))
+
+    # Plot noisy first (orange) so clean (blue) overlaps on top
+    ax1.hist(mse_noisy, bins=bin_edges, alpha=0.55, color="tab:orange",
+             label=f"Noisy  (μ={mse_noisy.mean():.5f})")
+    ax1.hist(mse_clean, bins=bin_edges, alpha=0.75, color="tab:blue",
+             label=f"Clean  (μ={mse_clean.mean():.5f})")
+
+    # Clip boundary at s_AE = 1.0 (MSE = 0.05)
+    ax1.axvline(AE_MSE_SCALE, color="gray", linestyle=":", linewidth=1.5,
+                label=f"s_AE = 1.0  (MSE = {AE_MSE_SCALE:.2f})")
+
+    ax1.set_xlim(0, X_MAX)
+    ax1.set_xlabel("Reconstruction MSE  (raw AE output)", fontsize=12)
+    ax1.set_ylabel("Count", fontsize=12)
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3)
+
+    # Secondary x-axis: the normalised s_AE value that reaches the policy network
+    ax2 = ax1.twiny()
+    ax2.set_xlim(0, X_MAX / AE_MSE_SCALE)   # same physical range, different units
+    ax2.set_xlabel(r"Policy input $s_{\mathrm{AE}}$ = MSE / 0.05  (clipped to [0, 1])",
+                   fontsize=11, labelpad=8)
+
+    plt.tight_layout()
     hist_path = os.path.join(SCRIPT_DIR, "ae_clean_vs_noisy.png")
-    plt.savefig(hist_path)
+    plt.savefig(hist_path, dpi=150)
     plt.close()
     print(f"  Histogram saved to: {hist_path}")
 
