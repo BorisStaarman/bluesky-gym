@@ -262,7 +262,12 @@ dus alle rewards hier veel kleiner gemaakt, en proberen stabiel te laten trainen
 parameters veranderd, alpha (lager) en grad clip. (hoger)
 alle critic lrs omhoog. 
 
+2_4_5
+werkt prima qua training, beste sac tot nu toe
+maar burn in gaat nog niet zo lekker
 
+2_4_6
+deze is doorgaand op 2_4_5 maar dan met burn in fixen
 
 ------------------------------------PPO_AM----------------------------------------
 moet helemaal nog gebeuren, maar kan je ook laten schieten

@@ -21,7 +21,7 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.models import ModelCatalog
 from attention_model_A import AttentionSACModel # additive method
 
-from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_kalman import SectorEnv
+from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_kalman_ASSYMETRIC import SectorEnv
 from ray.tune.registry import register_env
 
 import torch
@@ -51,7 +51,7 @@ N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
 # RENDER = False # Set to True to watch the agent play
 NUM_EVAL_EPISODES = 20  # How many episodes to run for evaluation
-RENDER = True # Set to True to watch the agent play
+RENDER = False # Set to True to watch the agent play
 
 # --- KALMAN FILTER TOGGLE ---
 # Set to True to use Kalman filtering on noisy observations (reduces position/velocity errors)

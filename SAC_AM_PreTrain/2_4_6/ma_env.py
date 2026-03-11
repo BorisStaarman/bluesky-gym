@@ -895,20 +895,16 @@ class SectorEnv(MultiAgentEnv):
                         dvx, dvy = vxi - vx, vyi - vy
                         
                         d_now = float(np.hypot(dx, dy))
-                        candidates.append((d_now, dx, dy, dvx, dvy, other_id))
+                        candidates.append((d_now, dx, dy, dvx, dvy))
                     except Exception:
                         continue
 
                 # Sorteer op afstand en vul aan met padding
                 candidates.sort(key=lambda x: x[0])
-
-                # Store neighbor IDs in the order the model sees them (closest first)
-                self.neighbor_mapping[agent] = [c[5] for c in candidates[:NUM_AC_STATE]]
-
                 intruder_features = []
                 for i in range(NUM_AC_STATE):
                     if i < len(candidates):
-                        intruder_features.extend(list(candidates[i][:5]))  # only the 5 feature values
+                        intruder_features.extend(list(candidates[i]))
                     else:
                         intruder_features.extend([0.0] * 5) # Padding voor verwijderde agents
 

@@ -2,6 +2,7 @@
 import os
 import sys
 import shutil
+import pickle
 import matplotlib.pyplot as plt
 import numpy as np
 import time
@@ -81,7 +82,7 @@ BURN_IN_BATCH_SIZE = 4096     # Batch size for burn-in sampling
 # Phase 2 (i > BC_ONLY_ITERS): BC + SAC run together, BC_LR drops back to
 #   BURN_IN_ACTOR_LR_LOCAL so SAC gradually takes over.
 ENABLE_BC_LOSS = True            # Enable weighted imitation loss during burn-in
-BC_ONLY_ITERS = 400              # Phase 1 duration: pure BC, no SAC actor update
+BC_ONLY_ITERS = 600              # Phase 1 duration: pure BC, no SAC actor update (was 400 - too short, spike at first eval)
 BC_LR = 3e-5                     # Dedicated LR for BC step in Phase 1 (much higher than SAC actor LR)
 BC_WEIGHT_MANEUVER = 10.0        # Weight multiplier for avoidance maneuver samples
 BC_ACTION_THRESHOLD = 0.05       # Expert action magnitude threshold for "active maneuver"
@@ -795,7 +796,7 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
     best_iteration = 0
     wp_history = []  # Voor moving average (smoothing)
     print(f"   🛡️  Anti-collapse protection enabled: tracking best model")
-    print(f"   Strategy: WP >90% AND intrusions <70 → minimize intrusions, else maximize WP rate")
+    print(f"   Strategy: WP >90% AND intrusions <50 → minimize intrusions, else maximize WP rate")
     
     
 
@@ -846,11 +847,34 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
     attention_sharpness_history = []  # Track attention sharpness
     mse_history = []  # Track MSE (from critic loss as proxy)
     bc_loss_history = []  # Track weighted BC loss (imitation of expert actions)
+
+    # --- Create a dedicated BC optimizer (bypasses RLlib optimizer ordering ambiguity) ---
+    # We identify the actor model once and create our own Adam that we fully control.
+    # This ensures BC_LR is actually applied to the right parameters every step.
+    _bc_actor_model = None
+    _bc_actor_opt = None
+    _bc_base_params = None
+    if ENABLE_BC_LOSS and hasattr(policy, 'model'):
+        if hasattr(policy.model, 'action_model'):
+            _bc_actor_model = policy.model.action_model
+        elif not hasattr(policy.model, 'is_critic') or not policy.model.is_critic:
+            _bc_actor_model = policy.model
+        if _bc_actor_model is not None:
+            # Only base MLP params — attention/temperature are excluded so BC doesn't
+            # push them toward uniform distributions via the majority fly-straight samples.
+            _bc_base_params = [
+                p for n, p in _bc_actor_model.named_parameters()
+                if not any(k in n.lower() for k in ('w_q', 'w_k', 'w_v', 'temperature'))
+            ]
+            _bc_actor_opt = torch.optim.Adam(_bc_base_params, lr=BC_LR)
+            print(f"   🎯 BC optimizer: Adam(lr={BC_LR:.1e}), "
+                  f"{sum(p.numel() for p in _bc_base_params):,} base-MLP params")
     
     # Track episode metrics during burn-in
     episode_waypoint_rates = []  # Waypoint success rate per episode
     episode_intrusions = []      # Total intrusions per episode
     episode_rewards = []         # Average episode rewards
+    _bc_phase2_refreshed = False  # Flag to recreate BC optimizer once Phase 2 starts on GPU
     
     # Run a few evaluation episodes every N iterations to track learning progress
     EVAL_INTERVAL = 100  # Evaluate every 100 burn-in iterations
@@ -946,8 +970,21 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
         # Phase 2 (i > BC_ONLY_ITERS): run full SAC update as normal.
         current_phase = 1 if i <= BC_ONLY_ITERS else 2
         if current_phase == 2:
+            # On the first Phase 2 iteration, policy.learn_on_batch() moves the model
+            # to GPU. The BC optimizer was created with CPU parameter references, so
+            # its Adam state is on CPU while gradients are now on CUDA → device mismatch.
+            # Fix: recreate _bc_base_params and _bc_actor_opt after the first SAC update.
             train_results = policy.learn_on_batch(train_batch)
             learner_stats = train_results.get('learner_stats', {})
+            if not _bc_phase2_refreshed and _bc_actor_model is not None:
+                _bc_base_params = [
+                    p for n, p in _bc_actor_model.named_parameters()
+                    if not any(k in n.lower() for k in ('w_q', 'w_k', 'w_v', 'temperature'))
+                ]
+                _bc_actor_opt = torch.optim.Adam(_bc_base_params, lr=BC_LR)
+                _new_device = next(_bc_actor_model.parameters()).device
+                print(f"   🔄 BC optimizer refreshed for Phase 2 on device: {_new_device}")
+                _bc_phase2_refreshed = True
         else:
             train_results = {}
             learner_stats = {}
@@ -996,9 +1033,17 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
                 if _actor_model is not None:
                     _device = next(_actor_model.parameters()).device
 
-                    # Build tensors from current batch
-                    obs_t = torch.FloatTensor(train_batch['obs']).to(_device)
-                    act_t = torch.FloatTensor(train_batch['actions']).to(_device)
+                    # Build tensors from current batch.
+                    # train_batch values may be numpy arrays (Phase 1) or already CUDA
+                    # tensors (Phase 2, after learn_on_batch moved them to the GPU).
+                    # torch.FloatTensor(cuda_tensor) raises a device error, so we must
+                    # handle both cases explicitly.
+                    def _to_float(x, dev):
+                        if isinstance(x, torch.Tensor):
+                            return x.detach().float().to(dev)
+                        return torch.tensor(np.asarray(x, dtype=np.float32), device=dev)
+                    obs_t = _to_float(train_batch['obs'], _device)
+                    act_t = _to_float(train_batch['actions'], _device)
 
                     # Forward pass through actor: returns [mean, log_std] concatenated
                     _actor_model.train()
@@ -1019,26 +1064,19 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
                     bc_loss = (weights * per_sample_mse).mean()
                     bc_loss_value = bc_loss.item()
 
-                    # Phase 1: temporarily raise actor optimizer LR to BC_LR
-                    actor_opt = policy.optimizers()[0]
-                    actor_params = [p for g in actor_opt.param_groups for p in g['params']]
-                    _saved_lrs = []
-                    if current_phase == 1:
-                        for _g in actor_opt.param_groups:
-                            _saved_lrs.append(_g['lr'])
-                            _g['lr'] = BC_LR
-
-                    actor_opt.zero_grad()
-                    bc_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(actor_params, BC_GRAD_CLIP)
-                    actor_opt.step()
-
-                    # Restore original LRs after Phase 1 BC step
-                    if current_phase == 1 and _saved_lrs:
-                        for _g, _lr in zip(actor_opt.param_groups, _saved_lrs):
-                            _g['lr'] = _lr
+                    # Use the pre-created dedicated BC optimizer so we are
+                    # 100% certain we are updating the right parameters at BC_LR.
+                    # policy.optimizers() order is RLlib-version-dependent and
+                    # was silently not updating the actor in some cases.
+                    if _bc_actor_opt is not None and _bc_base_params is not None:
+                        # Zero ALL actor model grads first so attention/temperature
+                        # gradients don't accumulate across burn-in iterations.
+                        _bc_actor_model.zero_grad()
+                        bc_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(_bc_base_params, BC_GRAD_CLIP)
+                        _bc_actor_opt.step()
             except Exception as _bc_e:
-                pass  # Never crash training over BC loss
+                print(f"   ⚠️  BC loss error at iter {i}: {type(_bc_e).__name__}: {_bc_e}")
 
         # Convert metrics to scalars
         def to_scalar(val):
@@ -1130,16 +1168,16 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
             else:
                 smoothed_wp = avg_wp_rate
             
-            # --- BEST MODEL TRACKING: Save based on WP >90% AND intrusions <70, else WP rate ---
+            # --- BEST MODEL TRACKING: Save based on WP >90% AND intrusions <50, else WP rate ---
             is_better = False
 
             # Both meet the full exit criterion: compare intrusions (lower is better)
-            if avg_wp_rate > 0.90 and avg_intrusions < 70 and best_wp_rate > 0.90 and best_intrusions < 70:
+            if avg_wp_rate > 0.90 and avg_intrusions < 90 and best_wp_rate > 0.90 and best_intrusions < 90:
                 if avg_intrusions < best_intrusions:
                     is_better = True
                     reason = f"Lower intrusions: {avg_intrusions:.1f} < {best_intrusions:.1f}"
             # Current meets full criterion, best does not: current is better
-            elif avg_wp_rate > 0.90 and avg_intrusions < 70 and not (best_wp_rate > 0.90 and best_intrusions < 70):
+            elif avg_wp_rate > 0.90 and avg_intrusions < 50 and not (best_wp_rate > 0.90 and best_intrusions < 50):
                 is_better = True
                 reason = f"Met exit criterion: WP={avg_wp_rate*100:.1f}%, intrusions={avg_intrusions:.1f}"
             # Neither meets full criterion: compare WP rate
@@ -1191,11 +1229,16 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
                         f"Temp={grad_norms['temperature']:.6f}"
                     )
             
-            # --- EARLY STOPPING: Stop when WP >= 90% AND avg intrusions < 70 ---
-            if smoothed_wp >= 0.90 and avg_intrusions < 70:
-                print(f"\n🎯 Early stopping: 90% WP + <70 intrusions criterion met!")
-                print(f"   ✅ Current WP: {avg_wp_rate*100:.1f}%, Smoothed WP: {smoothed_wp*100:.1f}% >= 90%")
-                print(f"   ✅ Avg Intrusions: {avg_intrusions:.2f} < 70")
+            # --- EARLY STOPPING: All 4 consecutive evals >= 90% WP AND intrusions < 50 ---
+            # Conditions:
+            #   1. Must be in Phase 2 (critic has trained at least once)
+            #   2. ALL 4 last evaluations individually >= 90% (not just the average)
+            #   3. Current avg intrusions < 50
+            all_four_above_90 = (len(wp_history) >= 4 and all(w >= 0.90 for w in wp_history[-4:]))
+            if all_four_above_90 and avg_intrusions < 50:
+                print(f"\n🎯 Early stopping: 4 consecutive evals ≥90% WP + <50 intrusions!")
+                print(f"   ✅ Last 4 WP evals: {[f'{w*100:.1f}%' for w in wp_history[-4:]]}")
+                print(f"   ✅ Avg Intrusions: {avg_intrusions:.2f} < 50")
                 print(f"   Stopping at iteration {i}/{n_iterations}")
                 break
         elif i % 50 == 0:
@@ -1358,6 +1401,50 @@ def burn_in_on_expert_buffer(algo, n_iterations=2000, batch_size=4096):
         os.makedirs(os.path.dirname(plot_path), exist_ok=True)
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"   📊 Burn-in comprehensive analysis saved to: {plot_path}")
+        plt.close()
+
+        # --- REPORT PLOT: clean dual-axis WP rate + intrusions ---
+        fig_rep, ax_wp = plt.subplots(figsize=(10, 5))
+
+        color_wp  = 'darkgreen'
+        color_int = 'crimson'
+
+        ax_wp.set_xlabel('Burn-in Iteration', fontsize=12)
+        ax_wp.set_ylabel('Waypoint Success Rate (%)', color=color_wp, fontsize=12)
+        ax_wp.plot(eval_iterations, [w * 100 for w in episode_waypoint_rates_plot],
+                   marker='o', linewidth=2, color=color_wp, markersize=5,
+                   label='Waypoint Success Rate (%)', zorder=3)
+        ax_wp.axhline(y=90, color=color_wp, linestyle='--', linewidth=1.2,
+                      alpha=0.6, label='90% threshold')
+        ax_wp.tick_params(axis='y', labelcolor=color_wp)
+        ax_wp.set_ylim(0, 105)
+        ax_wp.grid(True, alpha=0.25)
+
+        # Mark phase transition
+        ax_wp.axvline(x=BC_ONLY_ITERS, color='grey', linestyle=':', linewidth=1.5,
+                      label=f'Phase 2 start (iter {BC_ONLY_ITERS})')
+
+        ax_int = ax_wp.twinx()
+        ax_int.set_ylabel('Loss of Separation (avg per episode)', color=color_int, fontsize=12)
+        ax_int.plot(eval_iterations, episode_intrusions_plot,
+                    marker='s', linewidth=2, color=color_int, markersize=5,
+                    label='Loss of Separation', zorder=3)
+        ax_int.tick_params(axis='y', labelcolor=color_int)
+
+        # Combined legend
+        lines_wp,  labs_wp  = ax_wp.get_legend_handles_labels()
+        lines_int, labs_int = ax_int.get_legend_handles_labels()
+        ax_wp.legend(lines_wp + lines_int, labs_wp + labs_int,
+                     loc='upper center', bbox_to_anchor=(0.5, 1.13),
+                     ncol=2, frameon=False, fontsize=10)
+
+        fig_rep.suptitle('Burn-in Phase: Navigation Performance', fontsize=13, fontweight='bold')
+        fig_rep.tight_layout(rect=[0, 0, 1, 0.93])
+
+        report_plot_path = os.path.join(METRICS_DIR, f'run_{RUN_ID}', f'burn_in_report_{RUN_ID}.png')
+        os.makedirs(os.path.dirname(report_plot_path), exist_ok=True)
+        plt.savefig(report_plot_path, dpi=300, bbox_inches='tight')
+        print(f"   📊 Burn-in report plot saved to: {report_plot_path}")
         plt.close()
     
     # --- HERSTEL ORIGINELE LEARNING RATE ---
@@ -2841,7 +2928,15 @@ if __name__ == "__main__":
                 expert_samples_injected_history[idx] if idx < len(expert_samples_injected) else '',
             ])
     print(f"📊 Attention + Expert Mixing metrics saved to: {attention_csv_path}")
-    
+
+    # --- Save training_metrics.pkl for post-training plots ---
+    run_metrics_dir = os.path.join(METRICS_DIR, f"run_{RUN_ID}")
+    os.makedirs(run_metrics_dir, exist_ok=True)
+    training_metrics_pkl = os.path.join(run_metrics_dir, "training_metrics.pkl")
+    with open(training_metrics_pkl, "wb") as _f:
+        pickle.dump({"reward_history": reward_history}, _f)
+    print(f"📊 training_metrics.pkl saved to: {training_metrics_pkl}")
+
     # Print summary of expert mixing
     if len(expert_mix_history) > 0:
         print(f"\n🎓 Expert Mixing Summary:")

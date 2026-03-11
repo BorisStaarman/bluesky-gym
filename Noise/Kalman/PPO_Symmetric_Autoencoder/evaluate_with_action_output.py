@@ -21,7 +21,7 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.models import ModelCatalog
 from attention_model_A import AttentionSACModel # additive method
 
-from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_autoencoder import SectorEnv
+from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_autoencoder import SectorEnv, D_HEADING, D_VELOCITY
 from ray.tune.registry import register_env
 
 import torch
@@ -33,14 +33,6 @@ from ray.rllib.policy.sample_batch import SampleBatch
 
 
 from run_config import RUN_ID
-
-# --- Path to pretrained Autoencoder ---
-AE_MODEL_PATH = os.path.join(script_dir, "autoencoder_pretrained.pt")
-if not os.path.isfile(AE_MODEL_PATH):
-    print(f"[AE] Pretrained model not found at {AE_MODEL_PATH} — AE noise signal will be 0.")
-    AE_MODEL_PATH = None
-else:
-    print(f"[AE] Found pretrained model at: {AE_MODEL_PATH}")
 
 # Register your custom environment with Gymnasium
 # Register your custom environment directly for RLlib
@@ -58,8 +50,8 @@ NM2KM = 1.852
 N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
 # RENDER = False # Set to True to watch the agent play
-NUM_EVAL_EPISODES = 5   # How many episodes to run for evaluation (increase for more data)
-RENDER = True # Set to True to watch the agent play
+NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
+RENDER = False # Set to True to watch the agent play
 
 # This path MUST match the checkpoint directory from your main.py training script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -244,11 +236,10 @@ if __name__ == "__main__":
     print()
     
     env = SectorEnv(
-        render_mode="human" if RENDER else None,
+        render_mode="human" if RENDER else None, 
         n_agents=N_AGENTS,
         run_id=RUN_ID,
-        metrics_base_dir=METRICS_DIR,
-        autoencoder_path=AE_MODEL_PATH,
+        metrics_base_dir=METRICS_DIR
     )
 
     # --- Lists to store metrics from the evaluation run ---
@@ -258,11 +249,17 @@ if __name__ == "__main__":
     episode_aircraft_with_intrusions = []  # Track number of unique aircraft with intrusions
     total_waypoints_reached = 0
     episode_witout_intrusion = 0
-    all_ae_signals = []  # Collect every AE noise signal value across all steps and agents
     # velocity_agent_1 = []
     # `polygon`_areas_km2 = []  # Store polygon area in km² for each episode
 
     # --- Main Evaluation Loop ---
+    # Collect NN outputs across episodes for plotting (heading change [deg], speed change [kt])
+    all_heading_changes = []
+    all_speed_changes = []
+    # MVP (teacher) action collections
+    all_mvp_heading_changes = []
+    all_mvp_speed_changes = []
+
     for episode in range(1, NUM_EVAL_EPISODES + 1):
         print(f"\n--- Starting Evaluation Episode {episode}/{NUM_EVAL_EPISODES} ---")
 
@@ -312,19 +309,42 @@ if __name__ == "__main__":
                     #     diff = np.abs(teacher_action - model_action[:2])
                     #     print(f"    Diff:    [{diff[0]:.3f}, {diff[1]:.3f}]")
             
-            # Map actions back to agent IDs  
+
+            # Map actions back to agent IDs
             actions = {agent_id: action for agent_id, action in zip(agent_ids, actions_np)}
+
+            # Collect model actions for later plotting (convert to physical units)
+            try:
+                for action in actions.values():
+                    # action expected shape (2,) -> [dh_normalized, dv_normalized]
+                    if hasattr(action, '__len__') and len(action) >= 2:
+                        dh_norm = float(action[0])
+                        dv_norm = float(action[1])
+                        heading_deg = dh_norm * D_HEADING
+                        speed_kt = dv_norm * D_VELOCITY
+                        all_heading_changes.append(heading_deg)
+                        all_speed_changes.append(speed_kt)
+            except Exception:
+                pass
+
+            # Collect MVP (teacher) actions for the same agents (raw physical units, unclipped)
+            try:
+                for agent_id in agent_ids:
+                    try:
+                        hdg_diff, spd_diff = env._calculate_mvp_action(agent_id, return_physical=True)
+                        all_mvp_heading_changes.append(hdg_diff)
+                        all_mvp_speed_changes.append(spd_diff)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            # Share actions with env so _render_frame can draw policy command arrows
+            env.last_actions = actions
 
             # Step the environment
             obs, rewards, terminateds, truncateds, infos = env.step(actions)
-
-            # Collect AE noise signal (index 7 of each agent's observation).
-            # Skip the first 4 steps: the sliding window needs 5 frames before
-            # it is full; before that _compute_ae_noise_signal returns 0.0.
-            if episode_steps >= 4:
-                for agent_obs in obs.values():
-                    all_ae_signals.append(float(agent_obs[7]))
-
+            
             # ac_idx = bs.traf.id2idx("KL001")
             # airspeed_kts = bs.traf.tas[ac_idx] * MpS2Kt
             # velocity_agent_1.append(airspeed_kts)
@@ -403,6 +423,106 @@ if __name__ == "__main__":
     # plt.xticks(range(1, NUM_EVAL_EPISODES + 1))
     # plt.grid(True)
     # plt.show()
+
+    # ------------------------------
+    # Plot 2D histogram + optional KDE of NN outputs
+    # ------------------------------
+    try:
+        figs_dir = os.path.join(script_dir, "figures")
+        os.makedirs(figs_dir, exist_ok=True)
+
+        x = np.array(all_heading_changes)
+        y = np.array(all_speed_changes)
+
+        if x.size == 0 or y.size == 0:
+            print("No actions collected — skipping action distribution plot.")
+        else:
+            fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+
+            # 2D histogram (fixed axis ranges)
+            x_range = (-45.0, 45.0)
+            y_range = (-10.0/3.0, 10.0/3.0)
+            hb = ax[0].hist2d(x, y, bins=80, range=[x_range, y_range], cmap="Blues")
+            fig.colorbar(hb[3], ax=ax[0])
+            ax[0].set_xlim(x_range)
+            ax[0].set_ylim(y_range)
+            ax[0].set_xlabel("Heading change (deg)")
+            ax[0].set_ylabel("Speed change (kt)")
+            ax[0].set_title("2D histogram of NN outputs (all agents, all episodes)")
+
+            # KDE contour if scipy available
+            try:
+                from scipy.stats import gaussian_kde
+                xy = np.vstack([x, y])
+                kde = gaussian_kde(xy)
+                xmin, xmax = x_range
+                ymin, ymax = y_range
+                X, Y = np.mgrid[xmin:xmax:200j, ymin:ymax:200j]
+                Z = kde(np.vstack([X.ravel(), Y.ravel()])).reshape(X.shape)
+                ax[1].contourf(X, Y, Z, levels=20, cmap="viridis")
+                ax[1].set_title("KDE of NN outputs")
+                ax[1].set_xlabel("Heading change (deg)")
+                ax[1].set_ylabel("Speed change (kt)")
+                ax[1].set_xlim(xmin, xmax)
+                ax[1].set_ylim(ymin, ymax)
+            except Exception:
+                # Fallback: hexbin
+                ax[1].hexbin(x, y, gridsize=60, cmap="viridis")
+                ax[1].set_title("Hexbin (KDE unavailable)")
+                ax[1].set_xlabel("Heading change (deg)")
+                ax[1].set_ylabel("Speed change (kt)")
+                ax[1].set_xlim(x_range)
+                ax[1].set_ylim(y_range)
+
+            out_path = os.path.join(figs_dir, f"action_distribution_{NUM_EVAL_EPISODES}eps.png")
+            fig.tight_layout()
+            fig.savefig(out_path, dpi=200)
+            print(f"Saved action distribution figure to: {out_path}")
+            plt.close(fig)
+            # Also plot MVP (teacher) distribution using same axis limits
+            fig2, ax2 = plt.subplots(1, 2, figsize=(12, 5))
+            xm = np.array(all_mvp_heading_changes)
+            ym = np.array(all_mvp_speed_changes)
+            if xm.size == 0 or ym.size == 0:
+                print("No MVP actions collected — skipping MVP action distribution plot.")
+            else:
+                # Use data-driven axis limits (min/max of the MVP data)
+                xmin_m, xmax_m = float(xm.min()), float(xm.max())
+                ymin_m, ymax_m = float(ym.min()), float(ym.max())
+                # Add small padding
+                pad_x = max(1e-3, 0.05 * (xmax_m - xmin_m))
+                pad_y = max(1e-3, 0.05 * (ymax_m - ymin_m))
+                ax2[0].hist2d(xm, ym, bins=80, cmap="Reds")
+                ax2[0].set_xlim(xmin_m - pad_x, xmax_m + pad_x)
+                ax2[0].set_ylim(ymin_m - pad_y, ymax_m + pad_y)
+                ax2[0].set_xlabel("Heading change (deg)")
+                ax2[0].set_ylabel("Speed change (kt)")
+                ax2[0].set_title("2D histogram of MVP (teacher) outputs")
+
+                try:
+                    from scipy.stats import gaussian_kde
+                    X2, Y2 = np.mgrid[xmin_m - pad_x:xmax_m + pad_x:200j, ymin_m - pad_y:ymax_m + pad_y:200j]
+                    kde2 = gaussian_kde(np.vstack([xm, ym]))
+                    Z2 = kde2(np.vstack([X2.ravel(), Y2.ravel()])).reshape(X2.shape)
+                    ax2[1].contourf(X2, Y2, Z2, levels=20, cmap="magma")
+                    ax2[1].set_xlim(xmin_m - pad_x, xmax_m + pad_x)
+                    ax2[1].set_ylim(ymin_m - pad_y, ymax_m + pad_y)
+                    ax2[1].set_title("KDE of MVP outputs")
+                    ax2[1].set_xlabel("Heading change (deg)")
+                    ax2[1].set_ylabel("Speed change (kt)")
+                except Exception:
+                    ax2[1].hexbin(xm, ym, gridsize=60, cmap="magma")
+                    ax2[1].set_xlim(xmin_m - pad_x, xmax_m + pad_x)
+                    ax2[1].set_ylim(ymin_m - pad_y, ymax_m + pad_y)
+                    ax2[1].set_title("Hexbin (KDE unavailable)")
+
+                out_path2 = os.path.join(figs_dir, f"mvp_action_distribution_{NUM_EVAL_EPISODES}eps.png")
+                fig2.tight_layout()
+                fig2.savefig(out_path2, dpi=200)
+                print(f"Saved MVP action distribution figure to: {out_path2}")
+                plt.close(fig2)
+    except Exception as e:
+        print(f"Failed to create/save action distribution figure: {e}")
     # plt.figure(figsize=(12, 6))
     # plt.plot(range(1, len(velocity_agent_1) + 1), velocity_agent_1, marker='o', linestyle='-')
     # plt.title("Velocity of Agent KL001 During Evaluation Episodes")
@@ -411,38 +531,6 @@ if __name__ == "__main__":
     # plt.grid(True)
     # plt.show()
 
-
-    # --- AE Signal Histogram ---
-    if all_ae_signals:
-        ae_arr = np.array(all_ae_signals)
-        print(f"\n[AE] Collected {len(ae_arr):,} signal values across {NUM_EVAL_EPISODES} episodes")
-        print(f"[AE] Mean:   {ae_arr.mean():.4f}")
-        print(f"[AE] Median: {np.median(ae_arr):.4f}")
-        print(f"[AE] Std:    {ae_arr.std():.4f}")
-        print(f"[AE] Min:    {ae_arr.min():.4f}   Max: {ae_arr.max():.4f}")
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(ae_arr, bins=60, color='steelblue', edgecolor='white', linewidth=0.4)
-        ax.axvline(ae_arr.mean(),   color='red',    linestyle='--', linewidth=1.5,
-                   label=f'Mean   {ae_arr.mean():.3f}')
-        ax.axvline(np.median(ae_arr), color='orange', linestyle='--', linewidth=1.5,
-                   label=f'Median {np.median(ae_arr):.3f}')
-        ax.set_title(
-            f'Autoencoder Noise Signal Distribution\n'
-            f'{NUM_EVAL_EPISODES} episodes · {len(ae_arr):,} observations · '
-            f'{N_AGENTS} agents',
-            fontsize=13
-        )
-        ax.set_xlabel('AE Noise Signal  (0 = clean,  1 = very noisy)', fontsize=11)
-        ax.set_ylabel('Count', fontsize=11)
-        ax.set_xlim(0, 1)
-        ax.legend(fontsize=11)
-        ax.grid(axis='y', alpha=0.3)
-        fig.tight_layout()
-        hist_path = os.path.join(script_dir, 'ae_signal_histogram.png')
-        fig.savefig(hist_path, dpi=150)
-        print(f'[AE] Histogram saved to: {hist_path}')
-        plt.show()
 
     # --- Clean up ---
     env.close()

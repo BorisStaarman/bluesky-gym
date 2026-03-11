@@ -125,7 +125,7 @@ WARMUP_LR = 1e-4  # Critic needs higher LR to learn from scratch (was 3e-5, stil
 FINETUNE_LR = 5e-5  # Learning rate after warm-up for joint optimization
 
 # --- STAGE 2: RL FINE-TUNING (PPO with standard loss) ---
-TOTAL_ITERS = WARMUP_ITERATIONS + 80  # Maximum total iterations for Stage 2
+TOTAL_ITERS = WARMUP_ITERATIONS + 120  # Maximum total iterations for Stage 2
 
 EVALUATION_INTERVAL = 10
 

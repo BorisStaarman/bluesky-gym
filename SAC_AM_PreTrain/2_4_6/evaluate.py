@@ -31,8 +31,6 @@ from ray.rllib.models import ModelCatalog
 from attention_model_A import AttentionSACModel
 # from attention_model_M import AttentionSACModel
 
-from attention_visualization import plot_attention_combined
-
 # Conversion factor from meters per second to knots
 MpS2Kt = 1.94384    
 # Conversion factor from nautical miles to kilometers
@@ -41,15 +39,10 @@ NM2KM = 1.852
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with (MUST match training!)
 NUM_EVAL_EPISODES = 20  # 600 episodes: 300 probe + 300 reference for bootstrap convergence analysis
-RENDER = True # Set to True to watch the agent play (keep False for faster evaluation)
+RENDER = False # Set to True to watch the agent play (keep False for faster evaluation)
 
 # --- Visualization Settings ---
-SHOW_ALPHA_VALUES = True  # Set to False to hide attention weight visualization (faster rendering)
-
-# --- Attention snapshot settings ---
-SNAPSHOT_STEP = 30          # save a static figure when episode_steps reaches this value
-MAX_SNAPSHOTS = 5           # maximum figures to save across all episodes
-FIGS_DIR = os.path.join(script_dir, "figures")
+SHOW_ALPHA_VALUES = False  # Set to False to hide attention weight visualization (faster rendering)
 
 # This path MUST match the checkpoint directory from your main.py training script
 # (script_dir already defined above)
@@ -258,12 +251,9 @@ if __name__ == "__main__":
     
     # Track attention weight statistics across all episodes
     all_attention_weights = []  # Store all attention weight vectors for later analysis
-
+    
     # velocity_agent_1 = []
     # `polygon`_areas_km2 = []  # Store polygon area in km² for each episode
-
-    total_snapshots_saved = 0  # number of combined attention figures saved this run
-    os.makedirs(FIGS_DIR, exist_ok=True)
 
     # --- Main Evaluation Loop ---
     for episode in range(1, NUM_EVAL_EPISODES + 1):
@@ -278,8 +268,7 @@ if __name__ == "__main__":
         
         episode_reward = 0.0
         episode_steps = 0
-        snapshot_saved = False   # reset: one snapshot per episode
-
+        
         # Create figure once per episode if rendering AND showing alpha values
         if RENDER and SHOW_ALPHA_VALUES:
             plt.ion()
@@ -435,69 +424,7 @@ if __name__ == "__main__":
             elif RENDER and not SHOW_ALPHA_VALUES:
                 # Clear attention weights so they don't display on aircraft
                 env.attention_weights = {}
-
-            # ── Unconditional attention statistics collection ──────────────────────
-            if attn_weights is not None:
-                all_attention_weights.append(attn_weights.flatten())
-
-            # ── Thesis visualization snapshot ─────────────────────────────────────
-            # Saved once per episode at SNAPSHOT_STEP; works regardless of RENDER.
-            if (
-                not snapshot_saved
-                and attn_weights is not None
-                and env.agents
-                and total_snapshots_saved < MAX_SNAPSHOTS
-                and episode_steps == SNAPSHOT_STEP
-            ):
-                try:
-                    target_agent = env.agents[0]
-                    if target_agent in agent_ids:
-                        target_idx   = agent_ids.index(target_agent)
-                        agent_attn   = attn_weights[target_idx, 0, :]   # (num_neighbors,)
-                        neigh_ids_snap = env.neighbor_mapping.get(target_agent, [])
-                        active_set   = set(env.agents)
-
-                        def _get_km_pos(aid):
-                            try:
-                                hidx = bs.traf.id2idx(aid)
-                                qdr, dis = bs.tools.geo.kwikqdrdist(
-                                    env.center[0], env.center[1],
-                                    bs.traf.lat[hidx], bs.traf.lon[hidx])
-                                # East = sin(qdr)*dis, North = cos(qdr)*dis  (standard convention)
-                                return (
-                                    float(np.sin(np.deg2rad(qdr)) * dis * NM2KM),
-                                    float(np.cos(np.deg2rad(qdr)) * dis * NM2KM),
-                                )
-                            except Exception:
-                                return (0.0, 0.0)
-
-                        own_km   = _get_km_pos(target_agent)
-                        neigh_km = {
-                            nid: _get_km_pos(nid)
-                            for nid in neigh_ids_snap if nid in active_set
-                        }
-                        attn_map = {
-                            nid: float(agent_attn[i])
-                            for i, nid in enumerate(neigh_ids_snap)
-                            if nid in neigh_km
-                        }
-
-                        snap_path = os.path.join(
-                            FIGS_DIR,
-                            f"attention_ep{episode:03d}_step{episode_steps:04d}.png"
-                        )
-                        plot_attention_combined(
-                            own_km, neigh_km, attn_map,
-                            ownship_id=target_agent,
-                            step=episode_steps,
-                            save_path=snap_path,
-                        )
-                        plt.close("all")   # avoid figure accumulation
-                        snapshot_saved = True
-                        total_snapshots_saved += 1
-                except Exception as exc:
-                    print(f"[viz] Snapshot failed at ep={episode} step={episode_steps}: {exc}")
-
+                
             # Optional: Print top attended neighbor index
             # if hasattr(policy.model, '_last_attn_weights'):
             #     attn_weights = policy.model._last_attn_weights
@@ -505,6 +432,7 @@ if __name__ == "__main__":
             #     max_attn_idx = np.argmax(agent_attn)
             #     print(f"Agent {agent_ids[0]} focuses most on Neighbor #{max_attn_idx} (Val: {agent_attn[max_attn_idx]:.2f})")
 
+            
             # Map actions back to agent IDs
             actions = {agent_id: action for agent_id, action in zip(agent_ids, actions_np)}
 

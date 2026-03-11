@@ -228,6 +228,10 @@ class SectorEnv(MultiAgentEnv):
         
         # Track maximum risk value (before capping)
         self.max_risk_uncapped = 0.0
+
+        # Last actions dict (agent_id -> action array) – set by the caller before step()
+        # so that _render_frame can draw the policy command arrows.
+        self.last_actions = {}
         
         # Track maximum observation values for normalization analysis
         self.max_d_now = 0.0
@@ -455,10 +459,14 @@ class SectorEnv(MultiAgentEnv):
             
         return observations, rewards, terminateds, truncateds, infos
 
-    def _calculate_mvp_action(self, agent_id):
+    def _calculate_mvp_action(self, agent_id, return_physical=False):
         """
         Retrieves state and asks the MVP solver for the perfect move.
-        Returns a 2D action suitable for the action space.
+
+        Args:
+            return_physical: If False (default), returns normalized action in [-1, 1].
+                             If True, returns raw physical (heading_diff_deg, speed_diff_kt)
+                             WITHOUT clipping, so values can exceed the action-space limits.
         """
         # Initialize debug counter
         if not hasattr(self, '_mvp_debug_count'):
@@ -568,6 +576,9 @@ class SectorEnv(MultiAgentEnv):
             
             # Speed: normalize by D_VELOCITY (10/3 knots)
             action_speed = np.clip(speed_diff / D_VELOCITY, -1.0, 1.0)
+
+            if return_physical:
+                return float(heading_diff), float(speed_diff)
             
             action = np.array([action_heading, action_speed], dtype=np.float32)
             
@@ -704,7 +715,25 @@ class SectorEnv(MultiAgentEnv):
                 infos[agent] = {}
         
         return rewards, infos
-    
+
+    @staticmethod
+    def _draw_arrow(surface, color, start, end, width=2, head_size=8):
+        """Draw a filled arrow from *start* to *end* on *surface*."""
+        sx, sy = int(start[0]), int(start[1])
+        ex, ey = int(end[0]),   int(end[1])
+        dx, dy = ex - sx, ey - sy
+        length = np.hypot(dx, dy)
+        if length < 2:
+            return
+        udx, udy = dx / length, dy / length
+        # Arrowhead triangle
+        left  = (ex - head_size * udx - head_size * 0.4 * udy,
+                 ey - head_size * udy + head_size * 0.4 * udx)
+        right = (ex - head_size * udx + head_size * 0.4 * udy,
+                 ey - head_size * udy - head_size * 0.4 * udx)
+        pygame.draw.line(surface, color, (sx, sy), (ex, ey), width)
+        pygame.draw.polygon(surface, color, [(ex, ey), left, right])
+
     def _render_frame(self):
         if self.window is None and self.render_mode == "human":
             pygame.init()
@@ -763,41 +792,69 @@ class SectorEnv(MultiAgentEnv):
         #     except Exception:
         #         pass
 
-        # Draw aircraft, color by risk, and display agent ID and risk value
+        # Draw aircraft with velocity / command / goal arrows
+        ARROW_S = 20        # seconds of forward-projection for arrow length
         font = pygame.font.SysFont(None, 18)
-        for agent in self.agents:
+        for i, agent in enumerate(self.agents):
             try:
                 ac_idx = bs.traf.id2idx(agent)
                 ac_hdg = bs.traf.hdg[ac_idx]
+                ac_spd_ms = bs.traf.tas[ac_idx]        # m/s
                 pos = agent_positions.get(agent, None)
                 if pos is None:
                     continue
-                # risk_val = risk_levels.get(agent, 0.0)
-                # Color: green for KL001, others red scaled by risk
-                if agent == "KL001":
-                    color = (0, 255, 0)
-                else:
-                    # red_intensity = int(100 + 155 * min(1.0, risk_val))
-                    color = (200, 0, 0)
-                # Draw heading line
-                heading_end_x = np.cos(np.deg2rad(ac_hdg)) * 10
-                heading_end_y = np.sin(np.deg2rad(ac_hdg)) * 10
-                pygame.draw.line(canvas, (0, 0, 0), pos, (pos[0] + heading_end_x, pos[1] - heading_end_y), width=4)
-                # Draw aircraft circle
-                pygame.draw.circle(canvas, color, (int(pos[0]), int(pos[1])), int(INTRUSION_DISTANCE * NM2KM * px_per_km / 2), width=2)
-                # Draw agent ID above aircraft
-                id_text = agent
-                id_surf = font.render(id_text, True, (255, 255, 255))  # White text
-                # Add black background for better visibility
+
+                # ---- base dot / circle (draw for all agents) ----
+                color = (0, 200, 0) if agent == "KL001" else (200, 0, 0)
+                pygame.draw.circle(
+                    canvas, color,
+                    (int(pos[0]), int(pos[1])),
+                    int(INTRUSION_DISTANCE * NM2KM * px_per_km / 2), width=2
+                )
+
+                # Draw arrows only for the first 3 agents to keep the view uncluttered
+                if i < 3:
+                    # ---- helper: pixels for a vector of length L (m) at azimuth az (deg from N) ----
+                    # Must match the position convention: x = cos(qdr)*dist, y = -sin(qdr)*dist
+                    def _vec_px(az_deg, len_m):
+                        px_len = len_m * px_per_km / 1000
+                        return (np.cos(np.deg2rad(az_deg)) * px_len,
+                                -np.sin(np.deg2rad(az_deg)) * px_len)
+
+                    vel_len_m = ac_spd_ms * ARROW_S     # project forward ARROW_S seconds
+
+                    # --- 1. Current velocity arrow (blue) ---
+                    dx, dy = _vec_px(ac_hdg, vel_len_m)
+                    vel_end = (pos[0] + dx, pos[1] + dy)
+                    SectorEnv._draw_arrow(canvas, (30, 120, 255), pos, vel_end, width=2, head_size=8)
+
+                    # --- 2. Policy command arrow (red) ---
+                    if self.last_actions and agent in self.last_actions:
+                        act = self.last_actions[agent]
+                        cmd_hdg = fn.bound_angle_positive_negative_180(
+                            ac_hdg + float(act[0]) * D_HEADING)
+                        cmd_spd_ms = max(0.0, ac_spd_ms + float(act[1]) * D_VELOCITY / MpS2Kt)
+                        cmd_len_m = cmd_spd_ms * ARROW_S
+                        dx_c, dy_c = _vec_px(cmd_hdg, cmd_len_m)
+                        cmd_end = (pos[0] + dx_c, pos[1] + dy_c)
+                        SectorEnv._draw_arrow(canvas, (255, 50, 50), pos, cmd_end, width=2, head_size=8)
+
+                # ---- agent label (draw for all) ----
+                id_surf = font.render(agent, True, (255, 255, 255))
                 text_rect = id_surf.get_rect(center=(pos[0], pos[1] - 20))
                 pygame.draw.rect(canvas, (0, 0, 0), text_rect.inflate(4, 2))
                 canvas.blit(id_surf, text_rect)
-                # Draw risk value below aircraft
-                # risk_text = f"{risk_val:.2f}"
-                # text_surf = font.render(risk_text, True, (0, 0, 0))
-                # canvas.blit(text_surf, (pos[0] + 8, pos[1] + 8))
             except Exception:
                 continue
+
+        # ---- legend (bottom-left) ----
+        legend_font = pygame.font.SysFont(None, 20)
+        lx, ly = 10, self.window_height - 50
+        for label, col in [("Current velocity", (30, 120, 255)),
+                            ("Policy command",   (255, 50,  50))]:
+            pygame.draw.line(canvas, col, (lx, ly + 5), (lx + 20, ly + 5), 2)
+            canvas.blit(legend_font.render(label, True, col), (lx + 25, ly))
+            ly += 20
 
         self.window.blit(canvas, canvas.get_rect())
         pygame.display.update()

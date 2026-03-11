@@ -234,30 +234,31 @@ def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file, env_crea
 # IMPORTANT: This requires attention_model_A.py to be importable!
 
 # Shutdown Ray first to ensure clean start with new runtime_env
-if ray.is_initialized():
-    ray.shutdown()
+#UNCOMMENT THE FOLLOWING FOR PPO EXPORT 
+# if ray.is_initialized():
+#     ray.shutdown()
 
-# Point to the Two_stage_AM directory containing attention_model_A.py
-two_stage_am_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\Noise\Kalman\Test_TwoStage_PPO_AM_assymetricAC"
-if two_stage_am_dir not in sys.path:
-    sys.path.insert(0, two_stage_am_dir)
+# # Point to the Two_stage_AM directory containing attention_model_A.py
+# two_stage_am_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\Noise\Kalman\Test_TwoStage_PPO_AM_assymetricAC"
+# if two_stage_am_dir not in sys.path:
+#     sys.path.insert(0, two_stage_am_dir)
 
-# Now import and register the attention model AND environment
-from ray.rllib.models import ModelCatalog
-from attention_model_A import AttentionSACModel  # 3-head additive attention
-from bluesky_gym.envs.ma_env_two_stage_AM import SectorEnv
+# # Now import and register the attention model AND environment
+# from ray.rllib.models import ModelCatalog
+# from attention_model_A import AttentionSACModel  # 3-head additive attention
+# from bluesky_gym.envs.ma_env_two_stage_AM import SectorEnv
 
-ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
+# ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
 
-# Create environment creator function for Two_stage_AM
-def sector_env_creator(config):
-    return SectorEnv(**config)
+# # Create environment creator function for Two_stage_AM
+# def sector_env_creator(config):
+#     return SectorEnv(**config)
 
-# Create runtime environment so Ray workers can find attention_model_A
-runtime_env = {
-    "env_vars": {"PYTHONPATH": two_stage_am_dir},
-    "py_modules": [two_stage_am_dir],  # This makes the directory available to all workers
-}
+# # Create runtime environment so Ray workers can find attention_model_A
+# runtime_env = {
+#     "env_vars": {"PYTHONPATH": two_stage_am_dir},
+#     "py_modules": [two_stage_am_dir],  # This makes the directory available to all workers
+# }
 
 # ================================ EXPORT STAGE 1 MODEL ==================================
 # Stage 1 is the behavior cloning (imitation learning) phase
@@ -356,24 +357,24 @@ runtime_env = {
 # ================================ EXPORT STAGE 2 MODEL no noise. getraind zonder pretraining==================================
 
 #UNCOMMENT THE FOLLOWING BIT TO EXPORT STAGE 2 MODEL PPO 
-print("\n" + "="*70)
-print("🚀 EXPORTING STAGE 2 (RL FINE-TUNED) MODEL")
-print("="*70)
+# print("\n" + "="*70)
+# print("🚀 EXPORTING STAGE 2 (RL FINE-TUNED) MODEL")
+# print("="*70)
 
-# Export the best Stage 2 checkpoint from 1_9_PPO
-export_policy_torch_old_api(
-    r"C:\Users\boris\Documents\bsgym\bluesky-gym\First_Stage_AM\19_2_PPO\models\sectorcr_ma_sac\best_iter_00090",
-    "shared_policy",
-    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\PPO_NoNoise_NoPretraining.pt",
-    env_creator=sector_env_creator,
-    runtime_env=runtime_env
-)
+# # Export the best Stage 2 checkpoint from 1_9_PPO
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\First_Stage_AM\19_2_PPO\models\sectorcr_ma_sac\best_iter_00090",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\PPO_NoNoise_NoPretraining.pt",
+#     env_creator=sector_env_creator,
+#     runtime_env=runtime_env
+# )
 
-print("\n" + "="*70)
-print("✅ STAGE 2 EXPORT COMPLETE")
-print("   Model saved to: models_boris/Two_stage_AM_Stage2_iter112.pt")
-print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
-print("="*70)
+# print("\n" + "="*70)
+# print("✅ STAGE 2 EXPORT COMPLETE")
+# print("   Model saved to: models_boris/Two_stage_AM_Stage2_iter112.pt")
+# print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
+# print("="*70)
 
 
 # ===================== EXPORT SAC AM PRE-TRAINED MODEL ==========================
@@ -382,51 +383,51 @@ print("="*70)
 # and was trained with SAC algorithm using burn-in + main training phases
 
 # Shutdown Ray and prepare for SAC_AM_PreTrain export
-# if ray.is_initialized():
-#     ray.shutdown()
+if ray.is_initialized():
+    ray.shutdown()
 
-# # Point to the SAC_AM_PreTrain/2_2_3 directory containing attention_model_A.py
-# sac_am_pretrain_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM_PreTrain\2_2_3"
-# if sac_am_pretrain_dir not in sys.path:
-#     sys.path.insert(0, sac_am_pretrain_dir)
+# Point to the SAC_AM_PreTrain/2_2_3 directory containing attention_model_A.py
+sac_am_pretrain_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM_PreTrain\2_4_5"
+if sac_am_pretrain_dir not in sys.path:
+    sys.path.insert(0, sac_am_pretrain_dir)
 
-# # Import and register the attention model AND environment for SAC_AM_PreTrain
-# from ray.rllib.models import ModelCatalog
-# from attention_model_A import AttentionSACModel  # 3-head additive attention (same as Two_Stage)
-# from bluesky_gym.envs.ma_env_SAC_AM import SectorEnv as SectorEnvSAC
+# Import and register the attention model AND environment for SAC_AM_PreTrain
+from ray.rllib.models import ModelCatalog
+from attention_model_A import AttentionSACModel  # 3-head additive attention (same as Two_Stage)
+from bluesky_gym.envs.ma_env_SAC_AM import SectorEnv as SectorEnvSAC
 
-# ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
+ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
 
-# # Create environment creator function for SAC_AM_PreTrain
-# def sac_sector_env_creator(config):
-#     return SectorEnvSAC(**config)
+# Create environment creator function for SAC_AM_PreTrain
+def sac_sector_env_creator(config):
+    return SectorEnvSAC(**config)
 
-# # Create runtime environment so Ray workers can find attention_model_A
-# sac_runtime_env = {
-#     "env_vars": {"PYTHONPATH": sac_am_pretrain_dir},
-#     "py_modules": [sac_am_pretrain_dir],
-# }
+# Create runtime environment so Ray workers can find attention_model_A
+sac_runtime_env = {
+    "env_vars": {"PYTHONPATH": sac_am_pretrain_dir},
+    "py_modules": [sac_am_pretrain_dir],
+}
 
-# print("\n" + "="*70)
-# print("🎯 EXPORTING SAC_AM_PRETRAIN MODEL (2_2_3)")
-# print("="*70)
+print("\n" + "="*70)
+print("🎯 EXPORTING SAC_AM_PRETRAIN MODEL (2_2_3)")
+print("="*70)
 
-# # Export the best checkpoint from 2_2_3 training
-# # IMPORTANT: Update the checkpoint path to your best iteration
-# export_policy_torch_old_api(
-#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM_PreTrain\2_4\models\sectorcr_ma_sac\best_iter_15992_low_i",
-#     "shared_policy",
-#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_Stage_AM_SAC_3.pt",
-#     env_creator=sac_sector_env_creator,
-#     runtime_env=sac_runtime_env
-# )
+# Export the best checkpoint from 2_2_3 training
+# IMPORTANT: Update the checkpoint path to your best iteration
+export_policy_torch_old_api(
+    r"C:\Users\boris\Documents\bsgym\bluesky-gym\SAC_AM_PreTrain\2_4_5\models\sectorcr_ma_sac\best_iter_23464_low_i",
+    "shared_policy",
+    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_Stage_AM_SAC_4.pt",
+    env_creator=sac_sector_env_creator,
+    runtime_env=sac_runtime_env
+)
 
-# print("\n" + "="*70)
-# print("✅ SAC_AM_PRETRAIN EXPORT COMPLETE")
-# print("   Model saved to: models_boris/Two_Stage_AM_SAC.pt")
-# print("   This model has the same architecture as Two_Stage_AM:")
-# print("   - 3-head additive attention mechanism")
-# print("   - Temperature parameter for attention sharpness")
-# print("   - 512x512 hidden layers")
-# print("   Trained with SAC (burn-in + RL phases)")
-# print("="*70)
+print("\n" + "="*70)
+print("✅ SAC_AM_PRETRAIN EXPORT COMPLETE")
+print("   Model saved to: models_boris/Two_Stage_AM_SAC_4.pt")
+print("   This model has the same architecture as Two_Stage_AM:")
+print("   - 3-head additive attention mechanism")
+print("   - Temperature parameter for attention sharpness")
+print("   - 512x512 hidden layers")
+print("   Trained with SAC (burn-in + RL phases)")
+print("="*70)
