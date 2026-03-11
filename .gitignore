@@ -13,6 +13,8 @@ boris_test_files/
 # alle csv files
 *.csv
 
+Noise/Kalman/PPO_Symmetric_Kalman/
+
 #  all metrics mappen
 metrics/
 metrics*/
