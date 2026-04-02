@@ -235,30 +235,31 @@ def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file, env_crea
 
 # Shutdown Ray first to ensure clean start with new runtime_env
 #UNCOMMENT THE FOLLOWING FOR PPO EXPORT 
-# if ray.is_initialized():
-#     ray.shutdown()
+if ray.is_initialized():
+    ray.shutdown()
 
-# # Point to the Two_stage_AM directory containing attention_model_A.py
-# two_stage_am_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\Noise\Kalman\Test_TwoStage_PPO_AM_assymetricAC"
-# if two_stage_am_dir not in sys.path:
-#     sys.path.insert(0, two_stage_am_dir)
+# Point to the Two_stage_AM directory containing attention_model_A.py
+two_stage_am_dir = r"C:\Users\boris\Documents\bsgym\bluesky-gym\Noise\Kalman\PPO_Assymetric"
+if two_stage_am_dir not in sys.path:
+    sys.path.insert(0, two_stage_am_dir)
 
-# # Now import and register the attention model AND environment
-# from ray.rllib.models import ModelCatalog
-# from attention_model_A import AttentionSACModel  # 3-head additive attention
-# from bluesky_gym.envs.ma_env_two_stage_AM import SectorEnv
+# Now import and register the attention model AND environment
+from ray.rllib.models import ModelCatalog
+from attention_model_A import AttentionSACModel  # 3-head additive attention
+from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_ASSYMETRIC import SectorEnv
 
-# ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
+ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
 
-# # Create environment creator function for Two_stage_AM
-# def sector_env_creator(config):
-#     return SectorEnv(**config)
+# Create environment creator function for Two_stage_AM
+def sector_env_creator(config):
+    return SectorEnv(**config)
 
-# # Create runtime environment so Ray workers can find attention_model_A
-# runtime_env = {
-#     "env_vars": {"PYTHONPATH": two_stage_am_dir},
-#     "py_modules": [two_stage_am_dir],  # This makes the directory available to all workers
-# }
+# Create runtime environment so Ray workers can find attention_model_A
+runtime_env = {
+    "env_vars": {"PYTHONPATH": two_stage_am_dir},
+    "py_modules": [two_stage_am_dir],  # This makes the directory available to all workers
+
+}
 
 # ================================ EXPORT STAGE 1 MODEL ==================================
 # Stage 1 is the behavior cloning (imitation learning) phase
@@ -305,6 +306,30 @@ def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file, env_crea
 # print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
 # print("="*70)
 
+# ================================ EXPORT STAGE 2 MODEL PPO assymetric final ==================================
+# Stage 2 is the RL fine-tuning phase
+# This exports the best checkpoint from 1_9_PPO training
+
+#UNCOMMENT THE FOLLOWING BIT TO EXPORT STAGE 2 MODEL PPO 
+# print("\n" + "="*70)
+# print("🚀 EXPORTING STAGE 2 (RL FINE-TUNED) MODEL")
+# print("="*70)
+
+# # Export the best Stage 2 checkpoint from 1_9_PPO
+export_policy_torch_old_api(
+    r"C:\Users\boris\Documents\bsgym\bluesky-gym\Noise\Kalman\PPO_Assymetric\models\sectorcr_ma_sac\best_iter_00111",
+    "shared_policy",
+    r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_PPO_Assymetric_Final.pt",
+    env_creator=sector_env_creator,
+    runtime_env=runtime_env
+)
+
+# print("\n" + "="*70)
+# print("✅ STAGE 2 EXPORT COMPLETE")
+# print("   Model saved to: models_boris/Two_stage_AM_Stage2_iter112.pt")
+# print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
+# print("="*70)
+
 
 # ================================ EXPORT STAGE 2 MODEL noise assymetric==================================
 # Stage 2 is the RL fine-tuning phase
@@ -320,6 +345,30 @@ def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file, env_crea
 #     r"C:\Users\boris\Documents\bsgym\bluesky-gym\Noise\Kalman\Test_TwoStage_PPO_AM_assymetricAC\models\sectorcr_ma_sac\best_iter_00089",
 #     "shared_policy",
 #     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_PPO_noise_assymetric.pt",
+#     env_creator=sector_env_creator,
+#     runtime_env=runtime_env
+# )
+
+# print("\n" + "="*70)
+# print("✅ STAGE 2 EXPORT COMPLETE")
+# print("   Model saved to: models_boris/Two_stage_AM_Stage2_iter112.pt")
+# print("   This is the RL-optimized model from iteration 112 (maximizes reward)")
+# print("="*70)
+
+# ================================ EXPORT STAGE 2 MODEL noise kalman symmetric final model==================================
+# Stage 2 is the RL fine-tuning phase
+# This exports the best checkpoint from 1_9_PPO training
+
+#UNCOMMENT THE FOLLOWING BIT TO EXPORT STAGE 2 MODEL PPO 
+# print("\n" + "="*70)
+# print("🚀 EXPORTING STAGE 2 (RL FINE-TUNED) MODEL")
+# print("="*70)
+
+# # Export the best Stage 2 checkpoint from 1_9_PPO
+# export_policy_torch_old_api(
+#     r"C:\Users\boris\Documents\bsgym\bluesky-gym\Noise\Kalman\PPO_Symmetric_Kalman\models\sectorcr_ma_sac\best_iter_00118",
+#     "shared_policy",
+#     r"C:\Users\boris\BS_setup\bluesky-master\plugins\models_boris\Two_stage_AM_PPO_noise_Symetric_Final.pt",
 #     env_creator=sector_env_creator,
 #     runtime_env=runtime_env
 # )
@@ -383,6 +432,9 @@ def export_policy_torch_old_api(checkpoint_dir, policy_id, export_file, env_crea
 # and was trained with SAC algorithm using burn-in + main training phases
 
 # Shutdown Ray and prepare for SAC_AM_PreTrain export
+
+# ALLES HIERONDER UNCOMMENTEN OM SAC TE EXPORTEN
+
 if ray.is_initialized():
     ray.shutdown()
 

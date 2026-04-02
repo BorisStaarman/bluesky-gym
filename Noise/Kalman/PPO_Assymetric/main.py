@@ -21,7 +21,7 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.models import ModelCatalog
 from attention_model_A import AttentionSACModel # additive method
 
-from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_kalman import SectorEnv
+from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_ASSYMETRIC import SectorEnv
 from ray.tune.registry import register_env
 
 import torch
@@ -41,22 +41,26 @@ ModelCatalog.register_custom_model("attention_sac", AttentionSACModel)
 # CALLBACK CLASS 
 class MVPDataBridgeCallback(DefaultCallbacks):
     """
-    Callback to extract teacher actions from environment info and inject them
-    into the training batch for Stage 1 imitation learning.
+    Callback to extract teacher actions and clean observations from environment info.
+    - Teacher actions: Used for Stage 1 imitation learning
+    - Clean observations: Used for asymmetric actor-critic (critic gets clean obs, actor gets noisy obs)
     """
     def on_postprocess_trajectory(
         self, worker, episode, agent_id, policy_id, 
         policies, postprocessed_batch, original_batches, **kwargs
     ):
         # Check if we have data for this agent in the postprocessed batch
-        # The teacher_action should already be in the infos
+        # The teacher_action and clean_obs should already be in the infos
         if SampleBatch.INFOS in postprocessed_batch:
             original_infos = postprocessed_batch[SampleBatch.INFOS]
             
             # Extract the teacher_action you saved in the step function
             # Use a default [0,0] if it's missing to prevent crashes
             teacher_actions = []
+            clean_observations = []
+            
             for info in original_infos:
+                # Extract teacher action
                 if "teacher_action" in info:
                     teacher_action = info["teacher_action"]
                     # Ensure it's a numpy array with correct dtype
@@ -66,13 +70,46 @@ class MVPDataBridgeCallback(DefaultCallbacks):
                 else:
                     # Default action if missing
                     teacher_actions.append(np.zeros(2, dtype=np.float32))
+                
+                # Extract clean observations for asymmetric actor-critic
+                if "clean_obs" in info:
+                    clean_obs = info["clean_obs"]
+                    # Ensure it's a numpy array with correct dtype
+                    if not isinstance(clean_obs, np.ndarray):
+                        clean_obs = np.array(clean_obs, dtype=np.float32)
+                    clean_observations.append(clean_obs)
+                else:
+                    # If clean obs not available, use noisy obs (fallback to symmetric)
+                    # Get the corresponding observation from the batch
+                    if SampleBatch.OBS in postprocessed_batch:
+                        clean_observations.append(postprocessed_batch[SampleBatch.OBS][len(clean_observations)])
+                    else:
+                        clean_observations.append(np.zeros_like(teacher_action))
             
-            # Convert to numpy array for batch processing
+            # Convert to numpy arrays for batch processing
             if teacher_actions:
                 teacher_actions_array = np.array(teacher_actions, dtype=np.float32)
-                
                 # Write it into the batch so the Loss Function can see it
                 postprocessed_batch["teacher_targets"] = teacher_actions_array
+            
+            if clean_observations:
+                clean_obs_array = np.array(clean_observations, dtype=np.float32)
+                # Write clean observations into the batch for asymmetric actor-critic
+                postprocessed_batch["clean_obs"] = clean_obs_array
+    
+    def on_train_batch_built(self, policy, train_batch, **kwargs):
+        """
+        Called after the training batch is built, before learning.
+        Inject clean observations into the policy's model so it can use them for the value function.
+        """
+        # If clean observations are in the batch, pass them to the model
+        if "clean_obs" in train_batch:
+            import torch
+            # Convert to tensor and store on the model
+            if hasattr(policy, 'model'):
+                clean_obs_tensor = torch.from_numpy(train_batch["clean_obs"]).to(policy.device)
+                # Store on model for value_function to use
+                policy.model._clean_inputs = clean_obs_tensor
     
     def on_learn_on_batch(self, policy, train_batch, result, **kwargs):
         """
@@ -107,7 +144,7 @@ class MVPDataBridgeCallback(DefaultCallbacks):
 N_AGENTS = 20  # Number of agents for training
 
 # --- STAGE CONTROL ---
-RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1  , False to only train Stage 1
+RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
 
 # --- STAGE 1: IMITATION LEARNING (PPO with custom loss) ---
 iterations_stage1 = 80  # Number of iterations for Stage 1 imitation learning
@@ -250,7 +287,8 @@ def build_trainer(n_agents, stage=1, restore_path=None):
     else:
         # --- STAGE 2: RL FINE-TUNING ---
         print("[Config] Stage 2: Using standard PPO for RL with Attention Model")
-        current_callbacks = None  # No teacher needed
+        print("[Config] Asymmetric Actor-Critic: Actor uses noisy obs, Critic uses clean obs")
+        current_callbacks = MVPDataBridgeCallback  # Still need callback for clean obs injection
         
         training_config = {
             "lr": WARMUP_LR,  # Start with higher LR for critic learning during warm-up
@@ -289,7 +327,6 @@ def build_trainer(n_agents, stage=1, restore_path=None):
                 "n_agents": n_agents,
                 "run_id": RUN_ID,
                 "metrics_base_dir": METRICS_DIR,
-                "use_kalman_filter": True,   # smooth noisy observations with Kalman filter
             },
             disable_env_checking=True,
         )
@@ -417,8 +454,7 @@ def run_fixed_eval(algo: Algorithm, n_episodes: int = 20, render: bool = False, 
             render_mode="human" if render else None, 
             n_agents=n_agents,
             run_id=RUN_ID,
-            metrics_base_dir=METRICS_DIR,
-            use_kalman_filter=True,  # smooth noisy observations with Kalman filter
+            metrics_base_dir=METRICS_DIR
         )
         rewards, lengths, intrusions, waypoints = [], [], [], []
 

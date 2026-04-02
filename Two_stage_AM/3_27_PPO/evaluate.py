@@ -21,7 +21,7 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.models import ModelCatalog
 from attention_model_A import AttentionSACModel # additive method
 
-from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE import SectorEnv
+from bluesky_gym.envs.ma_env_two_stage_AM_PPO import SectorEnv
 from ray.tune.registry import register_env
 
 import torch
@@ -50,7 +50,7 @@ NM2KM = 1.852
 N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
 # RENDER = False # Set to True to watch the agent play
-NUM_EVAL_EPISODES = 10  # How many episodes to run for evaluation
+NUM_EVAL_EPISODES = 600  # 300 episodes: 150 probe + 150 reference for bootstrap convergence analysis
 RENDER = False # Set to True to watch the agent play
 
 # This path MUST match the checkpoint directory from your main.py training script
@@ -61,12 +61,14 @@ METRICS_DIR = os.path.join(script_dir, "metrics")
 # Set to True to use stage1_best_weights, False to use stage1_weights (last iteration)
 USE_BEST_STAGE1_WEIGHTS = False
 
+
+
 # Determine which checkpoint to use based on the boolean
 if USE_BEST_STAGE1_WEIGHTS:
     CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/stage1_best_weights")
     print(f"🌟 Using BEST Stage 1 weights from: {CHECKPOINT_DIR}")
 else:
-    CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/best_iter_00118")
+    CHECKPOINT_DIR = os.path.join(script_dir, "models/sectorcr_ma_sac/best_iter_00088")
     print(f"📁 Using stage 2 weights {CHECKPOINT_DIR}")
 
 
@@ -249,7 +251,6 @@ if __name__ == "__main__":
     episode_aircraft_with_intrusions = []  # Track number of unique aircraft with intrusions
     total_waypoints_reached = 0
     episode_witout_intrusion = 0
-    all_times_to_waypoint = []  # Added to track time to waypoint
     # velocity_agent_1 = []
     # `polygon`_areas_km2 = []  # Store polygon area in km² for each episode
 
@@ -266,7 +267,6 @@ if __name__ == "__main__":
         
         episode_reward = 0.0
         episode_steps = 0
-        prev_reached = set()
         
         # Run the episode until it's done
         while env.agents:
@@ -319,12 +319,7 @@ if __name__ == "__main__":
                 episode_reward += sum(rewards.values())
             episode_steps += 1
             
-            # Check for newly reached waypoints
-            current_reached = set(env.waypoint_reached_agents)
-            new_reached = current_reached - prev_reached
-            for _ in new_reached:
-                all_times_to_waypoint.append(episode_steps)
-            prev_reached = current_reached
+            
             
             # Slow down rendering to make it watchable
             if RENDER:
@@ -376,6 +371,12 @@ if __name__ == "__main__":
     print(f"  - Episodes without Intrusion: {episode_witout_intrusion}")
     
     print('average density created', N_AGENTS / np.mean(env.areas_km2))
+
+    # --- Save episode rewards for KS convergence analysis ---
+    rewards_path = os.path.join(script_dir, "episode_rewards.npy")
+    np.save(rewards_path, np.array(episode_rewards))
+    print(f"\n💾 Episode rewards saved to: {rewards_path}")
+    print("   Run ks_analysis.py to perform the KS convergence analysis.")
     
     # print(f"\n📐 Polygon Area Statistics:")
     # print(f"  - Average Area: {avg_polygon_area:.4f} km²")
@@ -384,18 +385,9 @@ if __name__ == "__main__":
     # print(f"  - Std Dev: {std_polygon_area:.4f} km²")
     # print("="*50 + "\n")
 
-    # --- Plot the results ---
-    if all_times_to_waypoint:
-        plt.figure(figsize=(8, 6))
-        plt.boxplot(all_times_to_waypoint)
-        plt.title("Box and Whisker Plot of Time to Waypoint")
-        plt.ylabel("Time Steps to Waypoint")
-        plt.xticks([1], ["Agents"])
-        plt.grid(True, axis='y')
-        plt.show()
-
-    # # plt.figure(figsize=(12, 6))
-    # # plt.plot(range(1, NUM_EVAL_EPISODES + 1), episode_rewards, marker='o', linestyle='-')
+    # # --- Plot the results ---
+    # plt.figure(figsize=(12, 6))
+    # plt.plot(range(1, NUM_EVAL_EPISODES + 1), episode_rewards, marker='o', linestyle='-')
     # plt.title("Total Reward per Evaluation Episode")
     # plt.xlabel("Episode Number")
     # plt.ylabel("Total Reward")

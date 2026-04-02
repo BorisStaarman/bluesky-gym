@@ -21,7 +21,7 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.models import ModelCatalog
 from attention_model_A import AttentionSACModel # additive method
 
-from bluesky_gym.envs.ma_env_two_stage_AM_PPO_NOISE_kalman import SectorEnv
+from bluesky_gym.envs.ma_env_two_stage_AM_PPO import SectorEnv
 from ray.tune.registry import register_env
 
 import torch
@@ -103,11 +103,11 @@ class MVPDataBridgeCallback(DefaultCallbacks):
             # Don't break training if logging fails
             pass
 
-# --- Parameters ---
+# --- Parameters ---      m 
 N_AGENTS = 20  # Number of agents for training
 
 # --- STAGE CONTROL ---
-RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1  , False to only train Stage 1
+RUN_STAGE_2 = True  # Set to True to run Stage 2 after Stage 1, False to only train Stage 1
 
 # --- STAGE 1: IMITATION LEARNING (PPO with custom loss) ---
 iterations_stage1 = 80  # Number of iterations for Stage 1 imitation learning
@@ -118,7 +118,7 @@ WARMUP_LR = 1e-4  # Critic needs higher LR to learn from scratch (was 3e-5, stil
 FINETUNE_LR = 5e-5  # Learning rate after warm-up for joint optimization
 
 # --- STAGE 2: RL FINE-TUNING (PPO with standard loss) ---
-TOTAL_ITERS = WARMUP_ITERATIONS + 110  # Maximum total iterations for Stage 2
+TOTAL_ITERS = WARMUP_ITERATIONS + 80  # Ma  ximum total iterations for Stage 2
 
 EVALUATION_INTERVAL = 10
 
@@ -289,7 +289,6 @@ def build_trainer(n_agents, stage=1, restore_path=None):
                 "n_agents": n_agents,
                 "run_id": RUN_ID,
                 "metrics_base_dir": METRICS_DIR,
-                "use_kalman_filter": True,   # smooth noisy observations with Kalman filter
             },
             disable_env_checking=True,
         )
@@ -417,8 +416,7 @@ def run_fixed_eval(algo: Algorithm, n_episodes: int = 20, render: bool = False, 
             render_mode="human" if render else None, 
             n_agents=n_agents,
             run_id=RUN_ID,
-            metrics_base_dir=METRICS_DIR,
-            use_kalman_filter=True,  # smooth noisy observations with Kalman filter
+            metrics_base_dir=METRICS_DIR
         )
         rewards, lengths, intrusions, waypoints = [], [], [], []
 
@@ -565,7 +563,7 @@ if __name__ == "__main__":
     # and if we actually want to run stage 1.
     
     stage1_checkpoint = os.path.join(CHECKPOINT_DIR, "stage1_best_weights")
-    run_stage1 = False if RUN_STAGE_2 else True  # Only run Stage 1 if not running Stage 2, otherwise we will restore from checkpoint
+    run_stage1 = False
     restored_from = None  # Initialize to None - will be set if checkpoint found or Stage 1 runs
     
     # Check if we are trying to resume a Stage 2 run
@@ -751,6 +749,20 @@ if __name__ == "__main__":
     iterations_without_improvement = 0
     early_stop_triggered = False
 
+    # --- EVALUATION AT ITERATION 0 (Baseline) ---
+    if EVALUATION_INTERVAL:
+        print(f"\n🔄 EVALUATION at iteration 0 (Baseline)")
+        if 'run_fixed_eval' in globals():
+            try:
+                eval_metrics = run_fixed_eval(algo, n_episodes=10, n_agents=N_AGENTS, compare_teacher=True)
+                print(f"   [Eval] Avg Reward: {eval_metrics['avg_reward']:.3f} | Waypoint Rate: {eval_metrics['waypoint_rate']*100:.1f}%")
+                
+                # Write evaluation metrics to CSV
+                eval_out_dir = os.path.join(METRICS_DIR, f"run_{RUN_ID}")
+                _write_eval_row(eval_metrics, 0, eval_out_dir)
+            except Exception as e:
+                print(f"   [Eval] Error: {e}")
+
     # --- Main Training Loop ---
     for i in range(1, target_iters+1):
         # Check if we need to increase LR and entropy after warm-up
@@ -888,6 +900,19 @@ if __name__ == "__main__":
                     # Write evaluation metrics to CSV
                     eval_out_dir = os.path.join(METRICS_DIR, f"run_{RUN_ID}")
                     _write_eval_row(eval_metrics, i, eval_out_dir)
+                    
+                    # Also periodically save training metrics so we can plot even if stopped early
+                    import pickle
+                    metrics_file = os.path.join(eval_out_dir, "training_metrics.pkl")
+                    with open(metrics_file, 'wb') as f:
+                        pickle.dump({
+                            'reward_history': reward_history,
+                            'total_loss_history': total_loss_history,
+                            'entropy_history': entropy_history,
+                            'vf_explained_var_history': vf_explained_var_history,
+                            'temperature_history': temperature_history,
+                            'episode_length_history': episode_length_history,
+                        }, f)
                 except Exception as e:
                     print(f"   [Eval] Error: {e}")
 

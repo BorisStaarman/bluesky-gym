@@ -542,6 +542,42 @@ def _write_eval_row(metrics: dict, iteration: int, out_dir: str):
             }
         )
 
+    raw_path = os.path.join(out_dir, "evaluation_progress_raw.csv")
+    raw_write_header = not os.path.exists(raw_path)
+    reward_data = metrics.get("per_episode_reward", [])
+    length_data = metrics.get("per_episode_length", [])
+    intrusions_data = metrics.get("per_episode_intrusions", [])
+    waypoints_data = metrics.get("per_episode_waypoints", [])
+
+    with open(raw_path, "a", newline="") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=[
+                "iteration",
+                "eval_episode_index",
+                "reward",
+                "episode_length",
+                "intrusions",
+                "waypoints_reached",
+                "waypoint_rate_pct",
+            ],
+        )
+        if raw_write_header:
+            w.writeheader()
+        for idx in range(len(intrusions_data)):
+            waypoint_count = waypoints_data[idx] if idx < len(waypoints_data) else 0
+            w.writerow(
+                {
+                    "iteration": iteration,
+                    "eval_episode_index": idx + 1,
+                    "reward": reward_data[idx] if idx < len(reward_data) else 0.0,
+                    "episode_length": length_data[idx] if idx < len(length_data) else 0.0,
+                    "intrusions": intrusions_data[idx],
+                    "waypoints_reached": waypoint_count,
+                    "waypoint_rate_pct": round((waypoint_count / n_agents) * 100.0, 4),
+                }
+            )
+
 if __name__ == "__main__":
     
     # Start timing
