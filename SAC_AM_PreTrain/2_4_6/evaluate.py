@@ -38,7 +38,7 @@ NM2KM = 1.852
 
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with (MUST match training!)
-NUM_EVAL_EPISODES = 20  # 600 episodes: 300 probe + 300 reference for bootstrap convergence analysis
+NUM_EVAL_EPISODES = 2000  # Evaluates 2000 episodes
 RENDER = False # Set to True to watch the agent play (keep False for faster evaluation)
 
 # --- Visualization Settings ---

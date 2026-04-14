@@ -50,7 +50,7 @@ NM2KM = 1.852
 N_AGENTS = 20  # The number of agents the model was trained with
 # NUM_EVAL_EPISODES = 100  # How many episodes to run for evaluation
 # RENDER = False # Set to True to watch the agent play
-NUM_EVAL_EPISODES = 600  # 300 episodes: 150 probe + 150 reference for bootstrap convergence analysis
+NUM_EVAL_EPISODES = 2000  # 300 episodes: 150 probe + 150 reference for bootstrap convergence analysis
 RENDER = False # Set to True to watch the agent play
 
 # This path MUST match the checkpoint directory from your main.py training script

@@ -40,11 +40,11 @@ NM2KM = 1.852
 
 # --- Parameters for Evaluation ---
 N_AGENTS = 20  # The number of agents the model was trained with (MUST match training!)
-NUM_EVAL_EPISODES = 20  # 600 episodes: 300 probe + 300 reference for bootstrap convergence analysis
-RENDER = True # Set to True to watch the agent play (keep False for faster evaluation)
+NUM_EVAL_EPISODES = 40  # 600 episodes: 300 probe + 300 reference for bootstrap convergence analysis
+RENDER = False # Set to True to watch the agent play (keep False for faster evaluation)
 
 # --- Visualization Settings ---
-SHOW_ALPHA_VALUES = True  # Set to False to hide attention weight visualization (faster rendering)
+SHOW_ALPHA_VALUES = False  # Set to False to hide attention weight visualization (faster rendering)
 
 # --- Attention snapshot settings ---
 SNAPSHOT_STEP = 30          # save a static figure when episode_steps reaches this value

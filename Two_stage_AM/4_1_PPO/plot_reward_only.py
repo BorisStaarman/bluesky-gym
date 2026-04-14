@@ -31,22 +31,17 @@ def main():
     fig, ax = plt.subplots(figsize=(10, 6))
     
     iterations = list(range(1, len(reward_history) + 1))
-    ax.plot(iterations, reward_history, linewidth=2, color='steelblue', marker='o', markersize=4, alpha=0.7)
+    ax.plot(iterations, reward_history, linewidth=2, color='steelblue', alpha=0.7)
     
     ax.set_xlabel('Training Iteration', fontsize=12)
     ax.set_ylabel('Episode Return Mean', fontsize=12)
-    ax.set_title('Training Reward Progress', fontsize=14, fontweight='bold')
+    ax.set_title('training reward', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
     
     # Add some statistics
     mean_reward = np.mean(reward_history)
     final_reward = reward_history[-1]
     best_reward = np.max(reward_history)
-    
-    textstr = f'Final: {final_reward:.2f}\nBest: {best_reward:.2f}\nMean: {mean_reward:.2f}'
-    props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
-    ax.text(0.05, 0.95, textstr, transform=ax.transAxes, fontsize=10,
-            verticalalignment='top', bbox=props)
     
     fig.tight_layout()
     plt.show()
